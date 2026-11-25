@@ -1,9 +1,9 @@
 <div align="center">
-  <img src="icon.png" alt="Filecrypt Container Decryptor Icon" width="110" />
-  <h1>Filecrypt Container Decryptor</h1>
+  <img src="icon.png" alt="Filecrypt Decryptor Icon" width="110" />
+  <h1>Filecrypt Decryptor</h1>
   <p>A fast, zero-flash Filecrypt container decryptor and link extractor with a modern Rich TUI, ad/popup blocking, session persistence, and multi-host batch extraction.</p>
   <p>
-    <a href="https://github.com/ArvindSaini978/Filecrypt-Decryptor/releases/latest"><b>⬇ Download Standalone .EXE (v1.0)</b></a>
+    <a href="https://github.com/ArvindSaini978/Filecrypt-Decryptor/releases/latest"><b>⬇ Download Standalone .EXE (v1.0.1)</b></a>
     &nbsp;•&nbsp;
     <a href="https://github.com/ArvindSaini978/Filecrypt-Decryptor/blob/master/filecrypt_decryptor.py"><b>View Python Source</b></a>
     &nbsp;•&nbsp;

@@ -1,5 +1,5 @@
 # ==============================================================================
-# Filecrypt Container Decryptor v1.0
+# Filecrypt Decryptor v1.0.1
 # Copyright (C) 2026 ArvindSaini978 (https://github.com/ArvindSaini978)
 # Repository: https://github.com/ArvindSaini978/Filecrypt-Decryptor
 #
@@ -85,8 +85,8 @@ CONFIG_PATH = os.path.join(APP_DIR, "config.ini")
 # ==============================================================================
 # APPLICATION METADATA
 # ==============================================================================
-APP_TITLE = "FILECRYPT CONTAINER DECRYPTOR"
-APP_VERSION = "v1.0"
+APP_TITLE = "FILECRYPT DECRYPTOR"
+APP_VERSION = "v1.0.1"
 APP_AUTHOR = "ArvindSaini978"
 APP_REPO_URL = "https://github.com/ArvindSaini978/Filecrypt-Decryptor"
 APP_GITHUB_PROFILE = "https://github.com/ArvindSaini978"
@@ -97,7 +97,7 @@ APP_YEAR = "2026"
 
 def set_window_title(subtitle=""):
     """Updates the native Windows CMD / PowerShell / Terminal window title bar on Win 10 & 11."""
-    full_title = f"Filecrypt Container Decryptor {APP_VERSION}"
+    full_title = f"Filecrypt Decryptor {APP_VERSION}"
     if subtitle:
         full_title = f"{full_title}  —  {subtitle}"
     if os.name == "nt":
@@ -120,7 +120,7 @@ def clear_screen():
 def print_app_header(breadcrumb_path, cfg, clear=True, window_subtitle=None):
     """
     Renders a sleek, two-tier header card:
-      Line 1: Centered Prominent App Title + v1.0
+      Line 1: Centered Prominent App Title + v1.0.1
       Line 2: Full-width Location Breadcrumb + Subtle Author/License tag
     """
     if clear:
@@ -537,7 +537,7 @@ SETTINGS_METADATA = {
 
 def write_clean_config_file(cfg):
     content = f"""# ====================================================================
-# FILECRYPT CONTAINER DECRYPTOR {APP_VERSION} - CONFIGURATION FILE
+# FILECRYPT DECRYPTOR {APP_VERSION} - CONFIGURATION FILE
 # Author     : {APP_AUTHOR}
 # Repository : {APP_REPO_URL}
 # License    : {APP_LICENSE}
