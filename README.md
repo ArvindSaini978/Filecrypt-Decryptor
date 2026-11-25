@@ -16,11 +16,11 @@
 ## 📸 Screenshots
 
 <div align="center">
-  <img width="1241" height="600" alt="preview_1" src="https://github.com/user-attachments/assets/54f7daab-a450-419c-9224-55764590adbd" />
+  <img width="1230" height="576" alt="preview_1" src="https://github.com/user-attachments/assets/7bc97739-6baa-4951-b815-45d05762afe4" />
   <hr/>
-  <img width="1241" height="792" alt="preview_2" src="https://github.com/user-attachments/assets/993d7e8c-0b4c-42a7-b7f8-cf951a4db821" />
+  <img width="1230" height="696" alt="preview_2" src="https://github.com/user-attachments/assets/b00a0c51-018b-4442-a7c0-afaee7b95e06" />
   <hr/>
-  <img width="1241" height="792" alt="preview_3" src="https://github.com/user-attachments/assets/ed6476e7-bc77-4b27-8303-f5eda41468e9" />
+  <img width="1230" height="767" alt="preview_3" src="https://github.com/user-attachments/assets/c24524d9-2d98-4ef6-af5a-cf7e1e73ce2e" />
 </div>
 
 ---
@@ -73,10 +73,14 @@ python filecrypt_decryptor.py
 
 If you want to compile `FilecryptDecryptor.exe` from the source code yourself:
 
+**1. Install Dependencies:**
 ```powershell
 pip install -r requirements.txt
 pip install pyinstaller pillow
+```
 
+**2. Build the Executable:**
+```powershell
 pyinstaller --noconfirm --clean --onefile --console --name "FilecryptDecryptor" --icon "icon.png" --version-file version_info.txt --collect-all playwright --collect-submodules rich --exclude-module tkinter --exclude-module unittest --exclude-module pydoc --exclude-module sqlite3 --exclude-module test --exclude-module xmlrpc filecrypt_decryptor.py
 ```
 
