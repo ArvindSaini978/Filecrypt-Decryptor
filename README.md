@@ -1,11 +1,11 @@
 <div align="center">
-  <img src="icon.png" alt="Filecrypt Decryptor Icon" width="110" />
-  <h1>Filecrypt Decryptor</h1>
-  <p>A fast, zero-flash Filecrypt container decryptor and link extractor with a modern Rich TUI, ad/popup blocking, session persistence, and multi-host batch extraction.</p>
+  <img src="assets/icon.png" alt="Filecrypt Decryptor Icon" width="110" />
+  <h1>Filecrypt Decryptor v2.0.0</h1>
+  <p>A high-performance, zero-overhead link decrypter and resolver for Filecrypt containers with a modern TrueColor TUI, ad/popup blocking, session persistence, and multi-host batch extraction.</p>
   <p>
-    <a href="https://github.com/ArvindSaini978/Filecrypt-Decryptor/releases/latest"><b>⬇ Download Standalone .EXE (v1.0.1)</b></a>
+    <a href="https://github.com/ArvindSaini978/Filecrypt-Decryptor/releases/latest"><b>⬇ Download Standalone .EXE (v2.0.0)</b></a>
     &nbsp;•&nbsp;
-    <a href="https://github.com/ArvindSaini978/Filecrypt-Decryptor/blob/master/filecrypt_decryptor.py"><b>View Python Source</b></a>
+    <a href="https://github.com/ArvindSaini978/Filecrypt-Decryptor/blob/master/filecrypt_decryptor.go"><b>View Go Source</b></a>
     &nbsp;•&nbsp;
     <a href="https://github.com/ArvindSaini978/Filecrypt-Decryptor/blob/master/LICENSE"><b>GPL-3.0 License</b></a>
     &nbsp;•&nbsp;
@@ -25,31 +25,42 @@
 
 ---
 
+## ⚡ What's New in v2.0.0 (Go Native Engine Rewrite)
+
+- **🚀 ~91% Smaller Binary:** Reduced from ~40+ MB down to **~3.5 MB** (UPX compressed) / **~10.5 MB** (raw binary).
+- **⚡ Instant Startup:** Launches in **0.02s** with **zero disk unpacking** to temporary folders (`%TEMP%`).
+- **🛡️ Pure Standalone Architecture:** Talks directly to your installed browser (Google Chrome, Microsoft Edge, Brave, or Chromium) via native Chrome DevTools Protocol (CDP) — no external Python runtime or Node.js drivers required.
+- **🔄 Connection-Pooled HTTP Resolver:** Reuses open sockets for in-memory link extraction, achieving ~30–50ms decryption speeds per link.
+- **🎨 Pixel-Accurate TrueColor TUI:** 24-bit TrueColor Nord / Catppuccin Mocha theme with complete box-drawing, multi-line word-wrapping, and interactive Settings.
+
+> *Note: The legacy Python implementation has been permanently preserved in the [`legacy-python`](https://github.com/ArvindSaini978/Filecrypt-Decryptor/tree/legacy-python) branch.*
+
+---
+
 ## ✨ Key Features
 
 - **⚡ Zero-Flash In-Memory Link Resolver:** Follows Filecrypt `/Link/` ➔ `/Go/` redirect chains directly in memory with **zero screen flashing**, with an automatic single-tab dark fallback for client-side hash hosts like `mega.nz`.
-- **🛡️ Multi-Layer Ad & Popup Blocker:** Automatically strips Filecrypt/CutCaptcha ad overlays, shadow-DOM click-jackers, and hijacked popup tabs.
+- **🛡️ Multi-Layer Ad & Popup Blocker:** Automatically strips Filecrypt/CutCaptcha ad overlays, shadow-DOM click-jackers, and hijacked popup tabs at the protocol layer.
 - **🔑 Captcha Session Persistence (`KEEP ALIVE`):** Keeps the browser session alive across multiple containers (`[N]`) so solved Captchas (`PHPSESSID`) stay remembered while the browser remains open.
 - **📊 Smart Host Selection & Availability Detection:** Groups container links by host provider (`mega.nz`, `pixeldrain.com`, `1fichier.com`, etc.), detects online/offline status, heals false-offline status glitches, and saves clean `.txt` link files.
 - **📋 Persistent Link Viewer & Quick Copy:** Displays extracted links right inside the terminal after decryption with one-key `[C]` clipboard copy.
-- **🎨 Soft Nord / Catppuccin Mocha TUI:** Easy-on-the-eyes terminal interface built with `Rich`, featuring an interactive Settings menu (`[S]`) and self-healing `config.ini` validator.
+- **⚙️ Interactive Settings & Self-Healing Config:** Customize browser, resolve mode, and auto-copy directly inside the app with an automatic `config.ini` validator.
 
 ---
 
 ## 🚀 Quick Start
 
-### Option 1: Standalone Windows Executable (No Python Required — Recommended)
+### Option 1: Standalone Windows Executable (Recommended)
 1. Go to the [**Releases Page**](https://github.com/ArvindSaini978/Filecrypt-Decryptor/releases/latest) and download **`FilecryptDecryptor.exe`**.
 2. Double-click **`FilecryptDecryptor.exe`** to launch the app.
 3. Paste any Filecrypt Container URL and press **Enter**!
-> **Note:** Works out-of-the-box with **Google Chrome**, **Microsoft Edge**, or **Brave Browser** installed on your PC (and supports **Firefox** / Playwright Chromium when installed via playwright install). Press **[S] (Settings)** inside the app to switch browsers anytime.
+> **Note:** Works out-of-the-box with **Google Chrome**, **Microsoft Edge**, **Brave Browser**, or **Chromium** installed on your PC. Press **`[S]` (Settings)** inside the app to switch browsers anytime.
 
-### Option 2: Run from Python Source Code
-```bash
+### Option 2: Run from Go Source Code
+```powershell
 git clone https://github.com/ArvindSaini978/Filecrypt-Decryptor.git
 cd Filecrypt-Decryptor
-pip install -r requirements.txt
-python filecrypt_decryptor.py
+go run filecrypt_decryptor.go
 ```
 
 ---
@@ -71,17 +82,23 @@ python filecrypt_decryptor.py
 
 ## 🛠️ Building the Standalone `.exe` Yourself
 
-If you want to compile `FilecryptDecryptor.exe` from the source code yourself:
+Ensure you have **Go 1.22+** installed:
 
-**1. Install Dependencies:**
+**1. Download Dependencies:**
 ```powershell
-pip install -r requirements.txt
-pip install pyinstaller pillow
+go mod tidy
 ```
 
-**2. Build the Executable:**
+**2. Embed Windows Icon & Metadata (`.syso`):**
 ```powershell
-pyinstaller --noconfirm --clean --onefile --console --name "FilecryptDecryptor" --icon "icon.png" --version-file version_info.txt --collect-all playwright --collect-submodules rich --exclude-module tkinter --exclude-module unittest --exclude-module pydoc --exclude-module sqlite3 --exclude-module test --exclude-module xmlrpc filecrypt_decryptor.py
+go install github.com/tc-hib/go-winres@latest
+& "$env:USERPROFILE\go\bin\go-winres.exe" make --arch amd64
+```
+> **Architecture Note:** Use `--arch amd64` for standard 64-bit Windows (Intel/AMD), `--arch arm64` for Windows on ARM, `--arch 386` for 32-bit Windows, or omit `--arch` to generate `.syso` resources for both 64-bit and 32-bit automatically.
+
+**3. Compile Optimized Standalone Executable:**
+```powershell
+go build -trimpath -ldflags="-s -w" -o dist\FilecryptDecryptor.exe
 ```
 
 ---

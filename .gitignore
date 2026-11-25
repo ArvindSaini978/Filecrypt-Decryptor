@@ -1,12 +1,20 @@
 # ==============================================================================
-# PyInstaller Build Artifacts
+# PyInstaller & Go Build Artifacts
 # ==============================================================================
 build/
 dist/
 *.spec
+*.exe
+*.syso
+*.dll
+*.so
+*.dylib
+*.test
+*.out
 upx.exe
 upx*/
 dev_notes.txt
+build.ps1
 
 # ==============================================================================
 # Application Runtime & User Data
