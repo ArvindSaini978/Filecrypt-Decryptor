@@ -42,7 +42,7 @@
 1. Go to the [**Releases Page**](https://github.com/ArvindSaini978/Filecrypt-Decryptor/releases/latest) and download **`FilecryptDecryptor.exe`**.
 2. Double-click **`FilecryptDecryptor.exe`** to launch the app.
 3. Paste any Filecrypt Container URL and press **Enter**!
-> **Note:** Requires an installed web browser (**Google Chrome**, **Microsoft Edge**, or **Brave Browser**). You can switch browsers anytime inside the app by pressing **`[S]` (Settings)**.
+> **Note:** Works out-of-the-box with **Google Chrome**, **Microsoft Edge**, or **Brave Browser** installed on your PC (and supports **Firefox** / Playwright Chromium when installed via playwright install). Press **[S] (Settings)** inside the app to switch browsers anytime.
 
 ### Option 2: Run from Python Source Code
 ```bash
