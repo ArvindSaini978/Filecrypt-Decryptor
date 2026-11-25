@@ -4,6 +4,9 @@
 build/
 dist/
 *.spec
+upx.exe
+upx*/
+dev_notes.txt
 
 # ==============================================================================
 # Application Runtime & User Data
