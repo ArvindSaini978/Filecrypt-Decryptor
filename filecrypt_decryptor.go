@@ -88,6 +88,9 @@ var (
 	ConfigPath string
 	ansiRegex  = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
+	ErrUserCancelled = errors.New("cancelled by user")
+	ErrBrowserClosed = errors.New("browser or tab closed")
+
 	sharedHTTPTransport = &http.Transport{
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: false},
 		MaxIdleConns:        32,
@@ -203,6 +206,47 @@ func getwch() rune {
 	}
 	ret, _, _ := procGetwch.Call()
 	return rune(ret)
+}
+
+func drainKeyboardBuffer() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	for kbhit() {
+		getwch()
+	}
+}
+
+func checkCancelKeyPressed() bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	for kbhit() {
+		ch := getwch()
+		if ch == 0x03 {
+			fmt.Printf("\n  %sExited cleanly.%s\n", AccentAmber, Reset)
+			os.Exit(0)
+		}
+		if ch == 0x00 || ch == 0xe0 {
+			if kbhit() {
+				getwch()
+			}
+			continue
+		}
+		if ch == 0x1b || ch == 'x' || ch == 'X' {
+			return true
+		}
+	}
+	return false
+}
+
+func printCancelTip(destination string) {
+	fmt.Printf("  %sTip: Press%s %s[Esc]%s %sor%s %s[X]%s %sat any time to cancel and return to %s.%s\n\n",
+		TextMuted, Reset,
+		Bold+AccentAmber, Reset,
+		TextMuted, Reset,
+		Bold+AccentAmber, Reset,
+		TextMuted, destination, Reset)
 }
 
 // ==============================================================================
@@ -1303,9 +1347,7 @@ func readTextWithEsc(prompt string) (string, bool) {
 		return strings.TrimSpace(line), true
 	}
 
-	for kbhit() {
-		getwch()
-	}
+	drainKeyboardBuffer()
 
 	var chars []rune
 	for {
@@ -1360,9 +1402,7 @@ func waitForSingleKey(prompt string, validLetters []string, maxNum int, abortChe
 		return strings.ToUpper(strings.TrimSpace(line))
 	}
 
-	for kbhit() {
-		getwch()
-	}
+	drainKeyboardBuffer()
 
 	validSet := make(map[string]bool)
 	for _, l := range validLetters {
@@ -1857,9 +1897,20 @@ type SessionHolder struct {
 	BrowserName     string
 	Phase           string
 	MainContainerID proto.TargetTargetID
-	LockMainWith204 bool
 	CaptureLinkCh   chan string
 	UserAgent       string
+}
+
+func (s *SessionHolder) SetPhase(phase string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Phase = phase
+}
+
+func (s *SessionHolder) GetPhase() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Phase
 }
 
 func (s *SessionHolder) SetCaptureChan(ch chan string) {
@@ -1885,7 +1936,9 @@ func safeClosePage(p *rod.Page) {
 		return
 	}
 	defer func() { _ = recover() }()
-	_ = p.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	_ = p.Context(ctx).Close()
 }
 
 func safeCloseBrowser(s *SessionHolder) {
@@ -1900,7 +1953,9 @@ func safeCloseBrowser(s *SessionHolder) {
 
 	if b != nil {
 		defer func() { _ = recover() }()
-		_ = b.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = b.Context(ctx).Close()
 	}
 }
 
@@ -1914,7 +1969,9 @@ func isBrowserAlive(s *SessionHolder) bool {
 	if b == nil {
 		return false
 	}
-	pages, err := b.Pages()
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	pages, err := b.Context(ctx).Pages()
 	return err == nil && len(pages) > 0
 }
 
@@ -1922,7 +1979,9 @@ func isPageClosed(b *rod.Browser, p *rod.Page) bool {
 	if b == nil || p == nil {
 		return true
 	}
-	pages, err := b.Pages()
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	pages, err := b.Context(ctx).Pages()
 	if err != nil {
 		return true
 	}
@@ -1996,7 +2055,9 @@ func attachInitScriptToPage(p *rod.Page) {
 	if p == nil {
 		return
 	}
-	_, _ = proto.PageAddScriptToEvaluateOnNewDocument{Source: AntiAdInitScript}.Call(p)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _ = proto.PageAddScriptToEvaluateOnNewDocument{Source: AntiAdInitScript}.Call(p.Context(ctx))
 }
 
 func ensureBrowserSession(session *SessionHolder, cfg *AppConfig) (*rod.Browser, *rod.Page, error) {
@@ -2060,13 +2121,14 @@ func ensureBrowserSession(session *SessionHolder, cfg *AppConfig) (*rod.Browser,
 			session.UserAgent = uaRes.Value.Str()
 		}
 
-		go b.EachEvent(func(e *proto.TargetTargetCreated) {
+		waitTargetCreated := b.EachEvent(func(e *proto.TargetTargetCreated) {
 			if e.TargetInfo.Type == proto.TargetTargetInfoTypePage {
 				if pg, err := b.PageFromTarget(e.TargetInfo.TargetID); err == nil {
 					attachInitScriptToPage(pg)
 				}
 			}
-		})()
+		})
+		go waitTargetCreated()
 
 		router := b.HijackRequests()
 		adKeywords := []string{
@@ -2086,16 +2148,14 @@ func ensureBrowserSession(session *SessionHolder, cfg *AppConfig) (*rod.Browser,
 				}
 			}
 
+			phase := session.GetPhase()
+
 			if strings.Contains(urlLower, "/link/") {
 				session.EmitCapturedLink(reqURL)
 			}
 
-			session.mu.Lock()
-			phase := session.Phase
-			lock204 := session.LockMainWith204
-			session.mu.Unlock()
-
-			if phase == "LOAD_CONTAINER" {
+			switch phase {
+			case "LOAD_CONTAINER":
 				if strings.Contains(urlLower, "/link/") || strings.Contains(urlLower, "/go/") {
 					h.Response.Fail(proto.NetworkErrorReasonBlockedByClient)
 					return
@@ -2112,9 +2172,14 @@ func ensureBrowserSession(session *SessionHolder, cfg *AppConfig) (*rod.Browser,
 						}
 					}
 				}
-			} else if phase == "HARVEST_AND_RESOLVE" && lock204 {
+
+			case "HARVEST_LINKS":
+				// During Step 1/2 (clicking buttons on the container tab to harvest /Link/ URLs),
+				// respond with 204 No Content to document navigations so the container tab stays locked.
+				// During Step 2/2 (RESOLVE_LINKS), this lock is disabled so Single Tab Mode's workerPage
+				// can freely navigate through /Link/ -> /Go/ without getting a 204!
 				if h.Request.Type() == proto.NetworkResourceTypeDocument {
-					if strings.Contains(urlLower, "/link/") || strings.Contains(urlLower, "/container/") {
+					if strings.Contains(urlLower, "/link/") || strings.Contains(urlLower, "/go/") || strings.Contains(urlLower, "/container/") {
 						h.Response.SetHeader("Content-Type", "text/plain")
 						h.Response.Payload().ResponseCode = 204
 						return
@@ -2252,7 +2317,9 @@ const FreezeAndExtractJS = `() => {
 func freezePageAndExtractContainerInfo(page *rod.Page, cfg *AppConfig) (*ContainerInfo, error) {
 	logMsg("Freezing page timers and parsing container title + table...", "DEBUG", cfg)
 
-	res, err := page.Eval(FreezeAndExtractJS)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	res, err := page.Context(ctx).Eval(FreezeAndExtractJS)
 	if err != nil {
 		return nil, err
 	}
@@ -2299,7 +2366,9 @@ func pageCurrentURL(p *rod.Page) string {
 	if p == nil {
 		return ""
 	}
-	info, err := p.Info()
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	info, err := p.Context(ctx).Info()
 	if err != nil || info == nil {
 		return ""
 	}
@@ -2313,74 +2382,93 @@ func harvestIntermediateLinkURL(
 	keepalivePage *rod.Page,
 	row RowInfo,
 	cfg *AppConfig,
-) string {
+) (string, error) {
+	if checkCancelKeyPressed() {
+		return "", ErrUserCancelled
+	}
 	if isPageClosed(b, mainPage) {
-		return ""
+		return "", ErrBrowserClosed
 	}
 
 	mainURL := pageCurrentURL(mainPage)
 	if row.DirectLink != "" {
 		fullLink := resolveRelativeURL(mainURL, row.DirectLink)
 		logMsg(fmt.Sprintf("Found direct /Link/ URL in DOM: %s", fullLink), "DEBUG", cfg)
-		return fullLink
+		return fullLink, nil
 	}
 
+	session.SetPhase("HARVEST_LINKS")
 	captureCh := make(chan string, 4)
 	session.SetCaptureChan(captureCh)
 	defer session.SetCaptureChan(nil)
 
 	defer func() {
 		if !isPageClosed(b, mainPage) {
-			_, _ = mainPage.Eval(`() => { window.__CAPTURE_MODE__ = false; }`)
+			evalCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			_, _ = mainPage.Context(evalCtx).Eval(`() => { window.__CAPTURE_MODE__ = false; }`)
+			cancel()
 		}
-		if pages, err := b.Pages(); err == nil {
+		ctxP, cancelP := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+		if pages, err := b.Context(ctxP).Pages(); err == nil {
 			for _, pg := range pages {
 				if pg.TargetID != mainPage.TargetID && pg.TargetID != keepalivePage.TargetID {
 					safeClosePage(pg)
 				}
 			}
 		}
+		cancelP()
 	}()
 
-	_, _ = mainPage.Eval(`() => { window.__CAPTURE_MODE__ = true; window.__CAPTURED_LINK_URL__ = null; }`)
+	evalCtx, evalCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_, _ = mainPage.Context(evalCtx).Eval(`() => { window.__CAPTURE_MODE__ = true; window.__CAPTURED_LINK_URL__ = null; }`)
+	evalCancel()
 
 	btnSelector := fmt.Sprintf("[data-pw-btn='%d']", row.Index)
-	el, err := mainPage.Timeout(3 * time.Second).Element(btnSelector)
+	elCtx, elCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	el, err := mainPage.Context(elCtx).Element(btnSelector)
 	if err != nil {
+		elCancel()
 		logMsg(fmt.Sprintf("Could not locate button for row %d: %v", row.Index, err), "DEBUG", cfg)
-		return ""
+		return "", nil
 	}
 	_ = el.ScrollIntoView()
 	_, _ = el.Eval(`() => this.click()`)
+	elCancel()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		if checkCancelKeyPressed() {
+			return "", ErrUserCancelled
+		}
 		if isPageClosed(b, mainPage) {
-			return ""
+			return "", ErrBrowserClosed
 		}
 		select {
 		case captured := <-captureCh:
 			if strings.Contains(strings.ToLower(captured), "/link/") {
 				full := resolveRelativeURL(mainURL, captured)
 				logMsg(fmt.Sprintf("Harvested intermediate /Link/ URL: %s", full), "DEBUG", cfg)
-				return full
+				return full, nil
 			}
 		default:
 		}
 
-		if jsRes, err := mainPage.Eval(`() => window.__CAPTURED_LINK_URL__`); err == nil {
+		pollCtx, pollCancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+		jsRes, err := mainPage.Context(pollCtx).Eval(`() => window.__CAPTURED_LINK_URL__`)
+		pollCancel()
+		if err == nil {
 			jsCaptured := jsRes.Value.Str()
 			if jsCaptured != "" && strings.Contains(strings.ToLower(jsCaptured), "/link/") {
 				full := resolveRelativeURL(mainURL, jsCaptured)
 				logMsg(fmt.Sprintf("Harvested intermediate /Link/ URL: %s", full), "DEBUG", cfg)
-				return full
+				return full, nil
 			}
 		}
 		time.Sleep(80 * time.Millisecond)
 	}
 
 	logMsg(fmt.Sprintf("Could not harvest /Link/ URL for row %d (timeout)", row.Index), "DEBUG", cfg)
-	return ""
+	return "", nil
 }
 
 func isExternalTarget(targetURL string) bool {
@@ -2411,11 +2499,20 @@ var (
 	extHrefRegex = regexp.MustCompile(`(?i)(?:location\.href\s*=\s*|url=)['"]?(https?://[^'"\s>]+)`)
 )
 
-func resolveLinkInvisibly(session *SessionHolder, b *rod.Browser, mainPage *rod.Page, linkURL string, cfg *AppConfig) (string, error) {
+func resolveLinkInvisibly(
+	ctx context.Context,
+	session *SessionHolder,
+	b *rod.Browser,
+	mainPage *rod.Page,
+	linkURL string,
+	cfg *AppConfig,
+) (string, error) {
 	currentURL := linkURL
 	referer := pageCurrentURL(mainPage)
 
-	cookies, err := b.GetCookies()
+	ckCtx, ckCancel := context.WithTimeout(ctx, 2*time.Second)
+	cookies, err := b.Context(ckCtx).GetCookies()
+	ckCancel()
 	if err != nil {
 		return "", err
 	}
@@ -2435,9 +2532,12 @@ func resolveLinkInvisibly(session *SessionHolder, b *rod.Browser, mainPage *rod.
 	cookieHeader := strings.Join(cookieParts, "; ")
 
 	for hop := 0; hop < 6; hop++ {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		logMsg(fmt.Sprintf("[Invisible Hop %d] GET %s", hop+1, currentURL), "DEBUG", cfg)
 
-		req, err := http.NewRequest("GET", currentURL, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", currentURL, nil)
 		if err != nil {
 			return "", err
 		}
@@ -2524,19 +2624,66 @@ func resolveLinkSmart(
 	indexNum int,
 	totalNum int,
 	cfg *AppConfig,
-) string {
-	if isPageClosed(b, mainPage) {
-		return ""
+) (string, error) {
+	if checkCancelKeyPressed() {
+		return "", ErrUserCancelled
 	}
+	if isPageClosed(b, mainPage) {
+		return "", ErrBrowserClosed
+	}
+
+	session.SetPhase("RESOLVE_LINKS")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var abortReason error
+	var abortMu sync.Mutex
+	setAbortReason := func(err error) {
+		abortMu.Lock()
+		if abortReason == nil {
+			abortReason = err
+		}
+		abortMu.Unlock()
+		cancel()
+	}
+	getAbortReason := func() error {
+		abortMu.Lock()
+		defer abortMu.Unlock()
+		return abortReason
+	}
+
+	go func() {
+		ticker := time.NewTicker(75 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if checkCancelKeyPressed() {
+					setAbortReason(ErrUserCancelled)
+					return
+				}
+				if isPageClosed(b, mainPage) {
+					setAbortReason(ErrBrowserClosed)
+					return
+				}
+			}
+		}
+	}()
 
 	resolveMode := strings.ToLower(strings.TrimSpace(cfg.Get("Behavior", "resolve_mode", "invisible")))
 
 	if resolveMode == "invisible" {
-		finalURL, err := resolveLinkInvisibly(session, b, mainPage, linkURL, cfg)
+		finalURL, err := resolveLinkInvisibly(ctx, session, b, mainPage, linkURL, cfg)
+		if r := getAbortReason(); r != nil {
+			return "", r
+		}
 		if err == nil && finalURL != "" {
 			if !strings.Contains(strings.ToLower(finalURL), "mega.nz") || strings.Contains(finalURL, "#") {
 				printResolvedItem(indexNum, totalNum, filename, finalURL, true)
-				return finalURL
+				return finalURL, nil
 			}
 			logMsg("Invisible resolver needed DOM fallback, using persistent dark background tab...", "DEBUG", cfg)
 		} else if err != nil {
@@ -2544,18 +2691,32 @@ func resolveLinkSmart(
 		}
 	}
 
+	if r := getAbortReason(); r != nil {
+		return "", r
+	}
+
 	if workerHolder.Page == nil || isPageClosed(b, workerHolder.Page) {
-		wp, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
+		createCtx, createCancel := context.WithTimeout(ctx, 4*time.Second)
+		wp, err := b.Context(createCtx).Page(proto.TargetCreateTarget{URL: "about:blank"})
+		createCancel()
 		if err != nil {
+			if r := getAbortReason(); r != nil {
+				return "", r
+			}
 			printResolvedItem(indexNum, totalNum, filename, "[ERROR - Could not open background resolver tab]", false)
-			return ""
+			return "", nil
 		}
 		attachInitScriptToPage(wp)
+		_ = proto.NetworkEnable{}.Call(wp.Context(ctx))
 		workerHolder.Page = wp
-		_, _ = mainPage.Activate()
+		actCtx, actCancel := context.WithTimeout(ctx, 1*time.Second)
+		_, _ = mainPage.Context(actCtx).Activate()
+		actCancel()
 	}
 
 	workerPage := workerHolder.Page
+	_ = proto.NetworkEnable{}.Call(workerPage.Context(ctx))
+
 	finalCh := make(chan string, 4)
 	var once sync.Once
 	deliver := func(u string) {
@@ -2564,10 +2725,7 @@ func resolveLinkSmart(
 		})
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	go workerPage.Context(ctx).EachEvent(
+	waitEvents := workerPage.Context(ctx).EachEvent(
 		func(e *proto.NetworkResponseReceived) {
 			status := e.Response.Status
 			if status == 301 || status == 302 || status == 303 || status == 307 || status == 308 {
@@ -2582,6 +2740,23 @@ func resolveLinkSmart(
 				}
 			}
 		},
+		func(e *proto.NetworkRequestWillBeSent) {
+			if e.RedirectResponse != nil {
+				status := e.RedirectResponse.Status
+				for k, v := range e.RedirectResponse.Headers {
+					if strings.EqualFold(k, "location") && v.Str() != "" {
+						fullLoc := resolveRelativeURL(e.RedirectResponse.URL, v.Str())
+						logMsg(fmt.Sprintf("[Redirect %d Location] %s", status, fullLoc), "DEBUG", cfg)
+						if isExternalTarget(fullLoc) {
+							deliver(fullLoc)
+						}
+					}
+				}
+			}
+			if isExternalTarget(e.Request.URL) && e.Type == proto.NetworkResourceTypeDocument {
+				deliver(e.Request.URL)
+			}
+		},
 		func(e *proto.PageFrameNavigated) {
 			if e.Frame.ParentID == "" {
 				if isExternalTarget(e.Frame.URL) {
@@ -2589,12 +2764,19 @@ func resolveLinkSmart(
 				}
 			}
 		},
-	)()
+	)
+	go waitEvents()
 
-	_, _ = mainPage.Activate()
+	mainReferer := pageCurrentURL(mainPage)
+	actCtx, actCancel := context.WithTimeout(ctx, 1*time.Second)
+	_, _ = mainPage.Context(actCtx).Activate()
+	actCancel()
 
 	go func() {
-		_, _ = proto.PageNavigate{URL: linkURL}.Call(workerPage.Context(ctx))
+		_, _ = proto.PageNavigate{
+			URL:      linkURL,
+			Referrer: mainReferer,
+		}.Call(workerPage.Context(ctx))
 	}()
 
 	go func() {
@@ -2617,7 +2799,10 @@ func resolveLinkSmart(
 	select {
 	case finalURL := <-finalCh:
 		if strings.Contains(strings.ToLower(finalURL), "mega.nz") && !strings.Contains(finalURL, "#") {
-			for i := 0; i < 12; i++ {
+			for i := 0; i < 15; i++ {
+				if ctx.Err() != nil {
+					break
+				}
 				cur := pageCurrentURL(workerPage)
 				if strings.Contains(cur, "#") {
 					finalURL = cur
@@ -2626,27 +2811,51 @@ func resolveLinkSmart(
 				time.Sleep(100 * time.Millisecond)
 			}
 		}
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+		_ = proto.PageStopLoading{}.Call(workerPage.Context(stopCtx))
+		stopCancel()
+
 		printResolvedItem(indexNum, totalNum, filename, finalURL, true)
-		return finalURL
+		return finalURL, nil
+
 	case <-ctx.Done():
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		_ = proto.PageStopLoading{}.Call(workerPage.Context(stopCtx))
+		stopCancel()
+		if r := getAbortReason(); r != nil {
+			return "", r
+		}
 		printResolvedItem(indexNum, totalNum, filename, "[TIMEOUT - Failed to resolve within 20s]", false)
-		return ""
+		return "", nil
 	}
 }
 
-func waitForTableOrCaptcha(b *rod.Browser, keepalivePage *rod.Page, cfg *AppConfig) *rod.Page {
+func waitForTableOrCaptcha(b *rod.Browser, keepalivePage *rod.Page, cfg *AppConfig) (*rod.Page, error) {
 	announcedCaptcha := false
+	drainKeyboardBuffer()
 
-	for i := 0; i < 600; i++ {
-		pages, err := b.Pages()
+	for i := 0; i < 1200; i++ {
+		if checkCancelKeyPressed() {
+			logMsg("Cancelled by user ([Esc] / [X]). Returning to Home...", "WARN", cfg)
+			return nil, ErrUserCancelled
+		}
+
+		ctxP, cancelP := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		pages, err := b.Context(ctxP).Pages()
+		cancelP()
 		if err != nil || len(pages) == 0 || (len(pages) == 1 && pages[0].TargetID == keepalivePage.TargetID) {
 			logMsg("Filecrypt tab was closed by user.", "WARN", cfg)
-			return nil
+			return nil, ErrBrowserClosed
 		}
 
 		for _, p := range pages {
 			if p.TargetID == keepalivePage.TargetID {
 				continue
+			}
+
+			if checkCancelKeyPressed() {
+				logMsg("Cancelled by user ([Esc] / [X]). Returning to Home...", "WARN", cfg)
+				return nil, ErrUserCancelled
 			}
 
 			u := strings.ToLower(pageCurrentURL(p))
@@ -2664,12 +2873,14 @@ func waitForTableOrCaptcha(b *rod.Browser, keepalivePage *rod.Page, cfg *AppConf
 				}
 			}
 
-			res, err := p.Eval(`() => {
+			evalCtx, evalCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			res, err := p.Context(evalCtx).Eval(`() => {
 				const tbl = document.querySelectorAll('table tbody tr td.status, table tbody tr td[title]').length;
 				const cap = document.querySelectorAll('form#cform, .protection').length ||
 				            (document.body && document.body.innerText.includes('Security Check') ? 1 : 0);
 				return { tbl, cap };
 			}`)
+			evalCancel()
 			if err == nil {
 				tblCount := res.Value.Get("tbl").Int()
 				capCount := res.Value.Get("cap").Int()
@@ -2680,8 +2891,13 @@ func waitForTableOrCaptcha(b *rod.Browser, keepalivePage *rod.Page, cfg *AppConf
 					} else {
 						logMsg("Captcha solved! Download links table loaded.", "SUCCESS", cfg)
 					}
-					time.Sleep(800 * time.Millisecond)
-					return p
+					for w := 0; w < 8; w++ {
+						if checkCancelKeyPressed() {
+							return nil, ErrUserCancelled
+						}
+						time.Sleep(100 * time.Millisecond)
+					}
+					return p, nil
 				}
 
 				if !announcedCaptcha && capCount > 0 {
@@ -2692,10 +2908,16 @@ func waitForTableOrCaptcha(b *rod.Browser, keepalivePage *rod.Page, cfg *AppConf
 			}
 		}
 
-		time.Sleep(500 * time.Millisecond)
+		for w := 0; w < 5; w++ {
+			if checkCancelKeyPressed() {
+				logMsg("Cancelled by user ([Esc] / [X]). Returning to Home...", "WARN", cfg)
+				return nil, ErrUserCancelled
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 
-	return nil
+	return nil, errors.New("timed out waiting for container table")
 }
 
 var (
@@ -2811,6 +3033,8 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 		!isDebug(cfg),
 		"Loading Container...",
 	)
+	printCancelTip("Home")
+	drainKeyboardBuffer()
 
 	b, keepalivePage, err := ensureBrowserSession(session, cfg)
 	if err != nil {
@@ -2821,6 +3045,10 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 		return "NEW_CONTAINER"
 	}
 
+	if checkCancelKeyPressed() {
+		return "CANCELLED_TO_HOME"
+	}
+
 	if pages, err := b.Pages(); err == nil {
 		for _, pOld := range pages {
 			if pOld.TargetID != keepalivePage.TargetID {
@@ -2829,27 +3057,36 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 		}
 	}
 
-	session.mu.Lock()
-	session.Phase = "LOAD_CONTAINER"
-	session.LockMainWith204 = false
-	session.mu.Unlock()
+	session.SetPhase("LOAD_CONTAINER")
 
 	filecryptPage, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {
 		safeCloseBrowser(session)
-		return "NEW_CONTAINER"
+		return "BROWSER_CLOSED"
 	}
 	attachInitScriptToPage(filecryptPage)
 
 	logMsg(fmt.Sprintf("Opening Container: %s", containerURL), "INFO", cfg)
-	if _, err := (proto.PageNavigate{URL: containerURL}).Call(filecryptPage); err != nil {
+	navCtx, navCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if _, err := (proto.PageNavigate{URL: containerURL}).Call(filecryptPage.Context(navCtx)); err != nil {
 		logMsg(fmt.Sprintf("Initial navigation note: %v", err), "DEBUG", cfg)
 	}
+	navCancel()
 
-	activeContainerPage := waitForTableOrCaptcha(b, keepalivePage, cfg)
+	activeContainerPage, waitErr := waitForTableOrCaptcha(b, keepalivePage, cfg)
 	if activeContainerPage == nil {
+		if errors.Is(waitErr, ErrUserCancelled) {
+			if pages, err := b.Pages(); err == nil {
+				for _, pOther := range pages {
+					if pOther.TargetID != keepalivePage.TargetID {
+						safeClosePage(pOther)
+					}
+				}
+			}
+			return "CANCELLED_TO_HOME"
+		}
 		safeCloseBrowser(session)
-		return "NEW_CONTAINER"
+		return "BROWSER_CLOSED"
 	}
 
 	if pages, err := b.Pages(); err == nil {
@@ -2882,9 +3119,8 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 	}
 
 	session.mu.Lock()
-	session.Phase = "HARVEST_AND_RESOLVE"
+	session.Phase = "IDLE"
 	session.MainContainerID = activeContainerPage.TargetID
-	session.LockMainWith204 = true
 	session.mu.Unlock()
 
 	decryptedStatus := make(map[string][2]int)
@@ -2894,6 +3130,8 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 	var lastDecryptedBatches []HostBatch
 
 	for !isPageClosed(b, activeContainerPage) {
+		session.SetPhase("IDLE")
+
 		printAppHeader(
 			"App / Container / Host Selection",
 			cfg,
@@ -2923,10 +3161,16 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 
 		if len(lastActionBanners) > 0 {
 			var bLines []string
+			bannerBorder := AccentGreen
 			for _, bMsg := range lastActionBanners {
 				bLines = append(bLines, "  "+bMsg)
+				if strings.Contains(bMsg, AccentCoral) {
+					bannerBorder = AccentCoral
+				} else if strings.Contains(bMsg, AccentAmber) && bannerBorder != AccentCoral {
+					bannerBorder = AccentAmber
+				}
 			}
-			printPanel(bLines, "", AccentGreen, 0, 1)
+			printPanel(bLines, "", bannerBorder, 0, 1)
 		}
 
 		cols := []tableCol{
@@ -3049,7 +3293,7 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 
 		if choice == "" || isPageClosed(b, activeContainerPage) {
 			safeCloseBrowser(session)
-			return "NEW_CONTAINER"
+			return "BROWSER_CLOSED"
 		}
 
 		if choice == "Q" {
@@ -3107,8 +3351,15 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 		lastActionBanners = nil
 		lastDecryptedBatches = nil
 
+		userCancelledBatch := false
+		browserClosedDuringBatch := false
+
 		for _, targetHost := range hostsToProcess {
+			if userCancelledBatch || browserClosedDuringBatch {
+				break
+			}
 			if isPageClosed(b, activeContainerPage) {
+				browserClosedDuringBatch = true
 				break
 			}
 
@@ -3138,6 +3389,8 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 				fmt.Sprintf("Decrypting %s (%d links)...", targetHost, len(selectedRows)),
 			)
 			renderContainerInfoPanel(containerTitle, 0, 0, targetHost, len(selectedRows))
+			printCancelTip("Host Selection")
+			drainKeyboardBuffer()
 
 			type harvestedItem struct {
 				Filename string
@@ -3149,12 +3402,26 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 			if !isDebug(cfg) {
 				renderProgressBarLine(0, len(selectedRows), 0)
 				for idx, row := range selectedRows {
+					if checkCancelKeyPressed() {
+						userCancelledBatch = true
+						break
+					}
 					if isPageClosed(b, activeContainerPage) {
+						browserClosedDuringBatch = true
 						break
 					}
 					linkURL, cached := harvestedCache[row.Index]
 					if !cached {
-						linkURL = harvestIntermediateLinkURL(session, b, activeContainerPage, keepalivePage, row, cfg)
+						var hErr error
+						linkURL, hErr = harvestIntermediateLinkURL(session, b, activeContainerPage, keepalivePage, row, cfg)
+						if errors.Is(hErr, ErrUserCancelled) {
+							userCancelledBatch = true
+							break
+						}
+						if errors.Is(hErr, ErrBrowserClosed) {
+							browserClosedDuringBatch = true
+							break
+						}
 						if linkURL != "" {
 							harvestedCache[row.Index] = linkURL
 						} else {
@@ -3169,12 +3436,26 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 				fmt.Print("\n")
 			} else {
 				for _, row := range selectedRows {
+					if checkCancelKeyPressed() {
+						userCancelledBatch = true
+						break
+					}
 					if isPageClosed(b, activeContainerPage) {
+						browserClosedDuringBatch = true
 						break
 					}
 					linkURL, cached := harvestedCache[row.Index]
 					if !cached {
-						linkURL = harvestIntermediateLinkURL(session, b, activeContainerPage, keepalivePage, row, cfg)
+						var hErr error
+						linkURL, hErr = harvestIntermediateLinkURL(session, b, activeContainerPage, keepalivePage, row, cfg)
+						if errors.Is(hErr, ErrUserCancelled) {
+							userCancelledBatch = true
+							break
+						}
+						if errors.Is(hErr, ErrBrowserClosed) {
+							browserClosedDuringBatch = true
+							break
+						}
 					}
 					if linkURL != "" {
 						harvestedCache[row.Index] = linkURL
@@ -3183,17 +3464,28 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 				}
 			}
 
-			if isPageClosed(b, activeContainerPage) {
+			if userCancelledBatch {
+				lastActionBanners = append(lastActionBanners,
+					fmt.Sprintf("%s! Decryption cancelled by user ([Esc] / [X]). Returned to Host Selection.%s", AccentAmber, Reset))
+				break
+			}
+			if browserClosedDuringBatch || isPageClosed(b, activeContainerPage) {
+				browserClosedDuringBatch = true
 				break
 			}
 
 			fmt.Println()
 			for i, item := range harvestedLinks {
+				if checkCancelKeyPressed() {
+					userCancelledBatch = true
+					break
+				}
 				if isPageClosed(b, activeContainerPage) {
+					browserClosedDuringBatch = true
 					break
 				}
 				setWindowTitle(fmt.Sprintf("[%02d/%02d] Decrypting %s — %s", i+1, len(harvestedLinks), targetHost, containerTitle))
-				finalURL := resolveLinkSmart(
+				finalURL, rErr := resolveLinkSmart(
 					session,
 					b,
 					activeContainerPage,
@@ -3204,6 +3496,14 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 					len(harvestedLinks),
 					cfg,
 				)
+				if errors.Is(rErr, ErrUserCancelled) {
+					userCancelledBatch = true
+					break
+				}
+				if errors.Is(rErr, ErrBrowserClosed) {
+					browserClosedDuringBatch = true
+					break
+				}
 				if finalURL != "" {
 					extractedForHost = append(extractedForHost, ExtractedURL{item.Filename, finalURL})
 					displayItemsForHost = append(displayItemsForHost, DisplayBatchItem{item.Filename, finalURL, true})
@@ -3215,7 +3515,21 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 					})
 				}
 				if reqDelay > 0 {
-					time.Sleep(time.Duration(reqDelay * float64(time.Second)))
+					sleepSteps := int(reqDelay * 20)
+					if sleepSteps < 1 {
+						sleepSteps = 1
+					}
+					stepDur := time.Duration(reqDelay*float64(time.Second)) / time.Duration(sleepSteps)
+					for s := 0; s < sleepSteps; s++ {
+						if checkCancelKeyPressed() {
+							userCancelledBatch = true
+							break
+						}
+						time.Sleep(stepDur)
+					}
+					if userCancelledBatch {
+						break
+					}
 				}
 			}
 
@@ -3237,15 +3551,25 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 					lastActionBanners = append(lastActionBanners, bannerMsg)
 				}
 				decryptedStatus[targetHost] = [2]int{len(extractedForHost), len(selectedRows)}
-			} else {
+			} else if !userCancelledBatch && !browserClosedDuringBatch {
 				lastActionBanners = append(lastActionBanners,
 					fmt.Sprintf("%s! No final URLs were extracted for [%s].%s", AccentCoral, targetHost, Reset))
 			}
+
+			if userCancelledBatch {
+				lastActionBanners = append(lastActionBanners,
+					fmt.Sprintf("%s! Decryption cancelled by user ([Esc] / [X]). Returned to Host Selection.%s", AccentAmber, Reset))
+				break
+			}
+		}
+
+		if browserClosedDuringBatch {
+			break
 		}
 	}
 
 	safeCloseBrowser(session)
-	return "NEW_CONTAINER"
+	return "BROWSER_CLOSED"
 }
 
 // ==============================================================================
@@ -3346,6 +3670,11 @@ func main() {
 		action := processSingleContainer(userInp, cfg, sessionHolder)
 		if action == "QUIT_APP" {
 			break
+		} else if action == "CANCELLED_TO_HOME" {
+			homeWarning = fmt.Sprintf("%s! Container loading cancelled by user ([Esc] / [X]).%s", AccentAmber, Reset)
+		} else if action == "BROWSER_CLOSED" {
+			homeWarning = fmt.Sprintf("%s! Browser tab or window was closed. Returned to Home.%s", AccentAmber, Reset)
 		}
+
 	}
 }

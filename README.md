@@ -16,21 +16,20 @@
 ## 📸 Screenshots
 
 <div align="center">
-  <img width="1230" height="576" alt="preview_1" src="https://github.com/user-attachments/assets/7bc97739-6baa-4951-b815-45d05762afe4" />
+  <img alt="preview_1" src="assets/preview_1.png" />
   <hr/>
-  <img width="1230" height="696" alt="preview_2" src="https://github.com/user-attachments/assets/b00a0c51-018b-4442-a7c0-afaee7b95e06" />
-  <hr/>
-  <img width="1230" height="767" alt="preview_3" src="https://github.com/user-attachments/assets/c24524d9-2d98-4ef6-af5a-cf7e1e73ce2e" />
+  <img alt="preview_2" src="assets/preview_2.png" />
 </div>
 
 ---
 
 ## ⚡ What's New in v2.0.0 (Go Native Engine Rewrite)
 
-- **🚀 ~91% Smaller Binary:** Reduced from ~40+ MB down to **~3.5 MB** (UPX compressed) / **~10.5 MB** (raw binary).
+- **🚀 ~82% Smaller Standalone Binary:** Reduced from ~57 MB down to **~10.5 MB** (pure native, uncompressed standalone binary).
 - **⚡ Instant Startup:** Launches in **0.02s** with **zero disk unpacking** to temporary folders (`%TEMP%`).
 - **🛡️ Pure Standalone Architecture:** Talks directly to your installed browser (Google Chrome, Microsoft Edge, Brave, or Chromium) via native Chrome DevTools Protocol (CDP) — no external Python runtime or Node.js drivers required.
 - **🔄 Connection-Pooled HTTP Resolver:** Reuses open sockets for in-memory link extraction, achieving ~30–50ms decryption speeds per link.
+- **⏹️ Instant Operation Cancellation (`[Esc]` / `[X]`):** Abort container loading, Captcha waiting, or link decryption at any time and return immediately without restarting the app.
 - **🎨 Pixel-Accurate TrueColor TUI:** 24-bit TrueColor Nord / Catppuccin Mocha theme with complete box-drawing, multi-line word-wrapping, and interactive Settings.
 
 > *Note: The legacy Python implementation has been permanently preserved in the [`legacy-python`](https://github.com/ArvindSaini978/Filecrypt-Decryptor/tree/legacy-python) branch.*
@@ -51,8 +50,8 @@
 ## 🚀 Quick Start
 
 ### Option 1: Standalone Windows Executable (Recommended)
-1. Go to the [**Releases Page**](https://github.com/ArvindSaini978/Filecrypt-Decryptor/releases/latest) and download **`FilecryptDecryptor.exe`**.
-2. Double-click **`FilecryptDecryptor.exe`** to launch the app.
+1. Go to the [**Releases Page**](https://github.com/ArvindSaini978/Filecrypt-Decryptor/releases/latest) and download **`FilecryptDecryptor-v2.0.0-x64.exe`** (or `-arm64.exe` / `-x86.exe` for your system).
+2. Double-click the `.exe` to launch the app.
 3. Paste any Filecrypt Container URL and press **Enter**!
 > **Note:** Works out-of-the-box with **Google Chrome**, **Microsoft Edge**, **Brave Browser**, or **Chromium** installed on your PC. Press **`[S]` (Settings)** inside the app to switch browsers anytime.
 
@@ -76,6 +75,7 @@ go run filecrypt_decryptor.go
 | **`[O]`** | **Open Output Folder** | Opens `./decrypted_links` in Windows Explorer to view saved `.txt` files |
 | **`[S]`** | **Application Settings** | Customize Browser, Resolve Mode, Auto-Copy, Session Persistence, and Debug Mode |
 | **`[I]`** | **About & License** | View author info, GitHub repository link, and GPL-3.0 license details |
+| **`[Esc]` / `[X]`** | **Cancel Operation** | Cancels container loading, Captcha waiting, or active decryption at any time |
 | **`[Q]`** | **Quit Application** | Cleanly closes the browser session and exits |
 
 ---
@@ -94,11 +94,12 @@ go mod tidy
 go install github.com/tc-hib/go-winres@latest
 & "$env:USERPROFILE\go\bin\go-winres.exe" make --arch amd64
 ```
-> **Architecture Note:** Use `--arch amd64` for standard 64-bit Windows (Intel/AMD), `--arch arm64` for Windows on ARM, `--arch 386` for 32-bit Windows, or omit `--arch` to generate `.syso` resources for both 64-bit and 32-bit automatically.
+> **Architecture Note:** Use `--arch amd64` for standard 64-bit Windows (Intel/AMD), `--arch arm64` for Windows on ARM, `--arch 386` for 32-bit Windows, or `--arch amd64,386,arm64` to generate `.syso` resources for all architectures.
 
 **3. Compile Optimized Standalone Executable:**
 ```powershell
-go build -trimpath -ldflags="-s -w" -o dist\FilecryptDecryptor.exe
+$env:CGO_ENABLED = "0"
+go build -trimpath -ldflags="-s -w" -o dist\FilecryptDecryptor-v2.0.0-x64.exe
 ```
 
 ---
