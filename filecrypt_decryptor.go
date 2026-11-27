@@ -113,13 +113,9 @@ var (
 	procGetConsoleScreenBufferInfo = kernel32.NewProc("GetConsoleScreenBufferInfo")
 	procSetConsoleScreenBufferSize = kernel32.NewProc("SetConsoleScreenBufferSize")
 	procSetConsoleWindowInfo       = kernel32.NewProc("SetConsoleWindowInfo")
-	procFillConsoleOutputCharacter = kernel32.NewProc("FillConsoleOutputCharacterW")
-	procFillConsoleOutputAttribute = kernel32.NewProc("FillConsoleOutputAttribute")
-	procSetConsoleCursorPosition   = kernel32.NewProc("SetConsoleCursorPosition")
-
-	msvcrt     = syscall.NewLazyDLL("msvcrt.dll")
-	procKbhit  = msvcrt.NewProc("_kbhit")
-	procGetwch = msvcrt.NewProc("_getwch")
+	msvcrt                         = syscall.NewLazyDLL("msvcrt.dll")
+	procKbhit                      = msvcrt.NewProc("_kbhit")
+	procGetwch                     = msvcrt.NewProc("_getwch")
 )
 
 type coord struct {
@@ -208,35 +204,7 @@ func setWindowTitle(subtitle string) {
 }
 
 func clearScreen() {
-	if runtime.GOOS == "windows" {
-		hOut, err := syscall.GetStdHandle(syscall.STD_OUTPUT_HANDLE)
-		if err == nil && hOut != syscall.InvalidHandle {
-			var info consoleScreenBufferInfo
-			ret, _, _ := procGetConsoleScreenBufferInfo.Call(uintptr(hOut), uintptr(unsafe.Pointer(&info)))
-			if ret != 0 {
-				length := uint32(int32(info.Size.X) * int32(info.Size.Y))
-				origin := packCoord(coord{X: 0, Y: 0})
-				var written uint32
-				procFillConsoleOutputCharacter.Call(
-					uintptr(hOut),
-					uintptr(' '),
-					uintptr(length),
-					origin,
-					uintptr(unsafe.Pointer(&written)),
-				)
-				procFillConsoleOutputAttribute.Call(
-					uintptr(hOut),
-					uintptr(info.Attributes),
-					uintptr(length),
-					origin,
-					uintptr(unsafe.Pointer(&written)),
-				)
-				procSetConsoleCursorPosition.Call(uintptr(hOut), origin)
-				return
-			}
-		}
-	}
-	fmt.Print("\x1b[H\x1b[2J\x1b[3J")
+	fmt.Print("\x1b[2J\x1b[3J\x1b[H")
 }
 
 func kbhit() bool {
@@ -422,6 +390,95 @@ func truncateWithEllipsis(s string, maxWidth int) string {
 		endIdx++
 	}
 	return renderStyledRunes(chars[:endIdx]) + Reset + TextMuted + "…" + Reset
+}
+
+var episodeTokenRegex = regexp.MustCompile(`(?i)(?:^|[._\-\s\[])(S\d{1,2}E\d{1,3}|E\d{1,3}|EP\.?\d{1,3}|Part\.?\d{1,3}|Pt\.?\d{1,3})(?:$|[._\-\s\]])`)
+
+// truncateMiddlePlain truncates a plain filename in the middle ("start…end") if it exceeds
+// maxWidth, while preserving any episode/part identifier (e.g. S01E04, Part.2) so consecutive
+// episodes never look identical when truncated.
+func truncateMiddlePlain(s string, maxWidth int, mainStyle string) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if runewidth.StringWidth(s) <= maxWidth {
+		return mainStyle + s + Reset
+	}
+	if maxWidth <= 5 {
+		return mainStyle + runewidth.Truncate(s, maxWidth, "…") + Reset
+	}
+
+	tailLen := (maxWidth - 1) / 3
+	if tailLen < 12 && maxWidth > 26 {
+		tailLen = 12
+	}
+	headLen := maxWidth - 1 - tailLen
+
+	// If an episode/part token (like S01E04) would be cut off by headLen, keep the episode
+	// token visible right before the ellipsis so every episode row is clearly distinguishable.
+	if subLoc := episodeTokenRegex.FindStringSubmatchIndex(s); len(subLoc) >= 4 {
+		epStart, epEnd := subLoc[2], subLoc[3]
+		epEndWidth := runewidth.StringWidth(s[:epEnd])
+		if epEndWidth > headLen {
+			epToken := s[epStart:epEnd]
+			epW := runewidth.StringWidth(epToken)
+			if epW+6 < headLen {
+				prefixBudget := headLen - epW - 1
+				runes := []rune(s[:epStart])
+				pEnd := 0
+				pw := 0
+				for i, r := range runes {
+					rw := runewidth.RuneWidth(r)
+					if pw+rw > prefixBudget {
+						break
+					}
+					pw += rw
+					pEnd = i + 1
+				}
+
+				allRunes := []rune(s)
+				tailStart := len(allRunes)
+				tw := 0
+				for i := len(allRunes) - 1; i >= 0; i-- {
+					rw := runewidth.RuneWidth(allRunes[i])
+					if tw+rw > tailLen {
+						break
+					}
+					tw += rw
+					tailStart = i
+				}
+
+				return mainStyle + string(runes[:pEnd]) + Reset + TextMuted + "…" + Reset +
+					Bold + AccentTeal + epToken + Reset +
+					TextMuted + "…" + Reset + mainStyle + string(allRunes[tailStart:]) + Reset
+			}
+		}
+	}
+
+	runes := []rune(s)
+	headEnd := 0
+	hw := 0
+	for i, r := range runes {
+		rw := runewidth.RuneWidth(r)
+		if hw+rw > headLen {
+			break
+		}
+		hw += rw
+		headEnd = i + 1
+	}
+
+	tailStart := len(runes)
+	tw := 0
+	for i := len(runes) - 1; i >= headEnd; i-- {
+		rw := runewidth.RuneWidth(runes[i])
+		if tw+rw > tailLen {
+			break
+		}
+		tw += rw
+		tailStart = i
+	}
+
+	return mainStyle + string(runes[:headEnd]) + Reset + TextMuted + "…" + Reset + mainStyle + string(runes[tailStart:]) + Reset
 }
 
 func wrapSingleStyledLine(line string, maxWidth int) []string {
@@ -659,29 +716,68 @@ func renderTable(cols []tableCol, rows []tableRow, heavyHeader bool, totalInnerW
 	}
 	out = append(out, BorderSubtle+strings.Repeat(ruleChar, totalInnerWidth)+Reset)
 
+	// Pre-calculate uniform column widths for spanned (bottom-section) rows so that if any
+	// bottom action row needs a wider col[1] (e.g. "Decrypt All Links"), ALL bottom action
+	// rows use that exact same col[1] width and stay 100% vertically aligned!
+	spannedCol1Boost := 0
+	if numCols >= 3 && cols[1].Justify == "left" && cols[1].NoWrap {
+		for _, r := range rows {
+			if r.IsSection {
+				continue
+			}
+			lastVal := ""
+			if numCols-1 < len(r.Cells) {
+				lastVal = r.Cells[numCols-1]
+			}
+			if lastVal == "" && len(r.Cells) > 1 {
+				w := visibleWidth(r.Cells[1])
+				if w-colWidths[1] > spannedCol1Boost {
+					spannedCol1Boost = w - colWidths[1]
+				}
+			}
+		}
+		if spannedCol1Boost > 8 {
+			spannedCol1Boost = 8
+		}
+	}
+
 	for _, r := range rows {
 		if r.IsSection {
 			out = append(out, BorderSubtle+strings.Repeat("─", totalInnerWidth)+Reset)
 			continue
 		}
 
-		// If the last column is empty on this row and the second-to-last column is left-aligned,
-		// merge/span the last two columns so action descriptions never get cropped.
+		// Collapse all trailing empty columns into the last non-empty left-aligned NoWrap
+		// column so footer action descriptions span cleanly across the remaining width.
 		rowColWidths := make([]int, numCols)
 		copy(rowColWidths, colWidths)
 		activeCols := numCols
-		if numCols >= 2 {
-			lastVal := ""
-			if numCols-1 < len(r.Cells) {
-				lastVal = r.Cells[numCols-1]
+
+		lastNonEmpty := -1
+		for i := numCols - 1; i >= 0; i-- {
+			val := ""
+			if i < len(r.Cells) {
+				val = r.Cells[i]
 			}
-			prevVal := ""
-			if numCols-2 < len(r.Cells) {
-				prevVal = r.Cells[numCols-2]
+			if val != "" {
+				lastNonEmpty = i
+				break
 			}
-			if lastVal == "" && prevVal != "" && cols[numCols-2].Justify == "left" && cols[numCols-2].NoWrap {
-				rowColWidths[numCols-2] = colWidths[numCols-2] + 3 + colWidths[numCols-1]
-				activeCols = numCols - 1
+		}
+		if lastNonEmpty >= 0 && lastNonEmpty < numCols-1 &&
+			cols[lastNonEmpty].Justify == "left" && cols[lastNonEmpty].NoWrap {
+			extraWidth := 0
+			for i := lastNonEmpty + 1; i < numCols; i++ {
+				extraWidth += 3 + rowColWidths[i]
+			}
+			rowColWidths[lastNonEmpty] += extraWidth
+			activeCols = lastNonEmpty + 1
+
+			// Apply the uniform bottom-section boost to col[1] on all spanned rows so
+			// [N], [P], [A], and [Esc] descriptions start at the exact same column!
+			if lastNonEmpty >= 2 && spannedCol1Boost > 0 && rowColWidths[lastNonEmpty]-spannedCol1Boost >= 20 {
+				rowColWidths[1] += spannedCol1Boost
+				rowColWidths[lastNonEmpty] -= spannedCol1Boost
 			}
 		}
 
@@ -1460,6 +1556,128 @@ func readTextWithEsc(prompt string) (string, bool) {
 	}
 }
 
+// readTextWithEscAndAbort reads a line of text while supporting Esc cancellation and
+// automatically aborting if the browser tab is closed while waiting for input.
+func readTextWithEscAndAbort(prompt string, abortCheckFn func() bool) (string, bool) {
+	fmt.Print(prompt)
+
+	if runtime.GOOS != "windows" {
+		reader := bufio.NewReader(os.Stdin)
+		line, _ := reader.ReadString('\n')
+		return strings.TrimSpace(line), true
+	}
+
+	drainKeyboardBuffer()
+
+	var chars []rune
+	for {
+		if abortCheckFn != nil && abortCheckFn() {
+			fmt.Print("\n")
+			return "", false
+		}
+		for kbhit() {
+			ch := getwch()
+
+			if ch == 0x03 {
+				fmt.Printf("\n  %sExited cleanly.%s\n", AccentAmber, Reset)
+				os.Exit(0)
+			}
+
+			if ch == 0x1b {
+				fmt.Printf(" %s(Cancelled)%s\n", AccentAmber, Reset)
+				return "", false
+			}
+
+			if ch == 0x00 || ch == 0xe0 {
+				if kbhit() {
+					getwch()
+				}
+				continue
+			}
+
+			if ch == '\r' || ch == '\n' {
+				fmt.Print("\n")
+				return strings.TrimSpace(string(chars)), true
+			}
+
+			if ch == 0x08 || ch == 0x7f {
+				if len(chars) > 0 {
+					chars = chars[:len(chars)-1]
+					fmt.Print("\b \b")
+				}
+				continue
+			}
+
+			if unicode.IsPrint(ch) {
+				chars = append(chars, ch)
+				fmt.Print(string(ch))
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// parseLinkSelectionInput parses inputs like "1", "1, 3, 5", "2-6", "1, 3-5, 8", or "A" (all)
+// into a deduplicated 1-based list of link numbers within [1..maxNum].
+func parseLinkSelectionInput(input string, maxNum int) ([]int, error) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return nil, errors.New("empty selection")
+	}
+	if strings.EqualFold(trimmed, "A") || strings.EqualFold(trimmed, "ALL") {
+		res := make([]int, maxNum)
+		for i := 1; i <= maxNum; i++ {
+			res[i-1] = i
+		}
+		return res, nil
+	}
+
+	normalized := strings.ReplaceAll(trimmed, ";", ",")
+	tokens := strings.FieldsFunc(normalized, func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
+
+	seen := make(map[int]bool)
+	var result []int
+
+	for _, tok := range tokens {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		if strings.Contains(tok, "-") {
+			parts := strings.SplitN(tok, "-", 2)
+			start, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+			end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if err1 != nil || err2 != nil || start < 1 || end < 1 || start > maxNum || end > maxNum {
+				return nil, fmt.Errorf("invalid range '%s' (valid: 1-%d)", tok, maxNum)
+			}
+			if start > end {
+				start, end = end, start
+			}
+			for n := start; n <= end; n++ {
+				if !seen[n] {
+					seen[n] = true
+					result = append(result, n)
+				}
+			}
+		} else {
+			num, err := strconv.Atoi(tok)
+			if err != nil || num < 1 || num > maxNum {
+				return nil, fmt.Errorf("invalid link number '%s' (valid: 1-%d)", tok, maxNum)
+			}
+			if !seen[num] {
+				seen[num] = true
+				result = append(result, num)
+			}
+		}
+	}
+
+	if len(result) == 0 {
+		return nil, errors.New("no valid link numbers selected")
+	}
+	return result, nil
+}
 func waitForSingleKey(prompt string, validLetters []string, maxNum int, abortCheckFn func() bool, allowEsc bool) string {
 	fmt.Print(prompt)
 
@@ -3154,7 +3372,6 @@ func saveHostURLs(hostName, containerTitle, containerURL string, extractedURLs [
 	}
 
 	saveDir, _ := filepath.Abs(filepath.Join(AppDir, cfg.Get("Output", "save_directory", "./decrypted_links")))
-	copyClip := cfg.GetBool("Output", "copy_to_clipboard", false)
 	useTitle := cfg.GetBool("Output", "include_container_title_in_filename", true)
 
 	_ = os.MkdirAll(saveDir, 0755)
@@ -3185,15 +3402,10 @@ func saveHostURLs(hostName, containerTitle, containerURL string, extractedURLs [
 	rawURLsText := strings.Join(urlList, "\n")
 	_ = os.WriteFile(outputPath, []byte(rawURLsText+"\n"), 0644)
 
-	clipMsg := ""
-	if copyClip && copyTextToClipboard(rawURLsText) {
-		clipMsg = fmt.Sprintf(" %s(+ Copied to Clipboard)%s", AccentMauve, Reset)
-	}
-
-	return fmt.Sprintf("%s✓ Saved %d URLs for [%s]%s %s──›%s %s%s%s%s",
+	return fmt.Sprintf("%s✓ Saved %d URLs for [%s]%s %s──›%s %s%s%s",
 		Bold+AccentGreen, len(extractedURLs), hostName, Reset,
 		TextMuted, Reset,
-		AccentTeal, outputPath, Reset, clipMsg)
+		AccentTeal, outputPath, Reset)
 }
 
 // ==============================================================================
@@ -3226,6 +3438,236 @@ func renderProgressBarLine(completed, total, frameIdx int) {
 	bar := barColor + strings.Repeat("━", filled) + Reset + BorderSubtle + strings.Repeat("━", barWidth-filled) + Reset
 	fmt.Printf("\r  %s   %sStep 1/2 (Preparing Links)%s %s %s%3d%%%s",
 		spin, TextMain, Reset, bar, AccentTeal, pct, Reset)
+}
+
+// ==============================================================================
+// INDIVIDUAL LINK SELECTION SUBMENU ([L])
+// ==============================================================================
+
+func promptIndividualLinkSelection(
+	b *rod.Browser,
+	activeContainerPage *rod.Page,
+	containerTitle string,
+	hostList []string,
+	hostsMap map[string][]RowInfo,
+	decryptedRowURLs map[int]string,
+	cfg *AppConfig,
+) ([]RowInfo, bool) {
+	var orderedRows []RowInfo
+	for _, h := range hostList {
+		orderedRows = append(orderedRows, hostsMap[h]...)
+	}
+	totalLinks := len(orderedRows)
+	if totalLinks == 0 {
+		return nil, false
+	}
+
+	const pageSize = 25
+	totalPages := (totalLinks + pageSize - 1) / pageSize
+	currentPage := 1
+	warningMsg := ""
+
+	for !isPageClosed(b, activeContainerPage) {
+		breadcrumb := "App / Container / Select Individual Links"
+		if totalPages > 1 {
+			breadcrumb = fmt.Sprintf("App / Container / Select Individual Links (Page %d of %d)", currentPage, totalPages)
+		}
+		printAppHeader(
+			breadcrumb,
+			cfg,
+			!isDebug(cfg),
+			fmt.Sprintf("Select Links — %s", containerTitle),
+		)
+
+		renderContainerInfoPanel(containerTitle, totalLinks, len(hostList), "", 0)
+
+		if warningMsg != "" {
+			printPanel([]string{"  " + warningMsg}, "", AccentAmber, 0, 1)
+			warningMsg = ""
+		}
+
+		// totalInnerWidth = UIWidth - 4 = 104. With 4 columns, separator overhead = (3*4)-1 = 11,
+		// so column widths sum to 93 (6 + 16 + 59 + 12 = 93) giving 59 full chars for Filename!
+		const filenameColWidth = 59
+		cols := []tableCol{
+			{Header: "Key", Width: 6, Justify: "center", NoWrap: true},
+			{Header: "Host Provider", Width: 16, Justify: "left", NoWrap: true},
+			{Header: "Filename", Width: filenameColWidth, Justify: "left", NoWrap: true},
+			{Header: "Status", Width: 12, Justify: "right", NoWrap: true},
+		}
+
+		startIdx := (currentPage - 1) * pageSize
+		endIdx := startIdx + pageSize
+		if endIdx > totalLinks {
+			endIdx = totalLinks
+		}
+
+		var tblRows []tableRow
+		prevHost := ""
+		for idx := startIdx; idx < endIdx; idx++ {
+			r := orderedRows[idx]
+			linkNum := idx + 1
+			if prevHost != "" && prevHost != r.Host {
+				tblRows = append(tblRows, tableRow{IsSection: true})
+			}
+			prevHost = r.Host
+
+			keyStr := fmt.Sprintf("%s[%d]%s", Bold+AccentTeal, linkNum, Reset)
+			hostStyle := TextMain
+			fileStyle := TextMain
+			if !r.IsOnline {
+				hostStyle = TextMuted
+				fileStyle = TextMuted
+			}
+
+			fileCell := truncateMiddlePlain(r.Filename, filenameColWidth, fileStyle)
+
+			var statusStr string
+			if _, done := decryptedRowURLs[r.Index]; done {
+				statusStr = Bold + AccentGreen + "✓ Decrypted" + Reset
+			} else if r.IsOnline {
+				statusStr = AccentGreen + "● Online" + Reset
+			} else {
+				statusStr = AccentCoral + "○ Offline" + Reset
+			}
+
+			tblRows = append(tblRows, tableRow{Cells: []string{
+				keyStr,
+				hostStyle + r.Host + Reset,
+				fileCell,
+				statusStr,
+			}})
+		}
+
+		tblRows = append(tblRows, tableRow{IsSection: true})
+		if currentPage < totalPages {
+			nextStart := currentPage*pageSize + 1
+			nextEnd := (currentPage + 1) * pageSize
+			if nextEnd > totalLinks {
+				nextEnd = totalLinks
+			}
+			tblRows = append(tblRows, tableRow{Cells: []string{
+				Bold + AccentAmber + "[N]" + Reset,
+				Bold + AccentAmber + "Next Page ▶" + Reset,
+				fmt.Sprintf("%sView links %d–%d (Page %d of %d)%s",
+					AccentAmber, nextStart, nextEnd, currentPage+1, totalPages, Reset),
+				"",
+			}})
+		}
+		if currentPage > 1 {
+			prevStart := (currentPage-2)*pageSize + 1
+			prevEnd := (currentPage - 1) * pageSize
+			tblRows = append(tblRows, tableRow{Cells: []string{
+				Bold + AccentLavender + "[P]" + Reset,
+				Bold + AccentLavender + "◀ Previous Page" + Reset,
+				fmt.Sprintf("%sView links %d–%d (Page %d of %d)%s",
+					AccentLavender, prevStart, prevEnd, currentPage-1, totalPages, Reset),
+				"",
+			}})
+		}
+		tblRows = append(tblRows, tableRow{Cells: []string{
+			Bold + AccentGreen + "[A]" + Reset,
+			Bold + TextMain + "Decrypt All Links" + Reset,
+			fmt.Sprintf("%sExtract all %d links across all hosts%s", TextMuted, totalLinks, Reset),
+			"",
+		}})
+		tblRows = append(tblRows, tableRow{Cells: []string{
+			Bold + AccentAmber + "[Esc]" + Reset,
+			TextMuted + "Back" + Reset,
+			TextMuted + "Return to Host Selection without decrypting" + Reset,
+			"",
+		}})
+
+		panelTitle := ""
+		panelBorder := BorderSubtle
+		if totalPages > 1 {
+			navHint := "Press [N] for Next Page"
+			if currentPage == totalPages {
+				navHint = "Press [P] for Previous Page"
+			} else if currentPage > 1 {
+				navHint = "Press [N] Next Page  /  [P] Previous Page"
+			}
+			panelTitle = fmt.Sprintf("%sPAGE %d OF %d%s %s(Showing Links %d–%d of %d)%s  %s│%s  %s%s%s",
+				Bold+AccentAmber, currentPage, totalPages, Reset,
+				TextMain, startIdx+1, endIdx, totalLinks, Reset,
+				BorderSubtle, Reset,
+				Bold+AccentTeal, navHint, Reset)
+			panelBorder = BorderAccent
+		}
+
+		printPanel(renderTable(cols, tblRows, true, UIWidth-4), panelTitle, panelBorder, 0, 1)
+
+		fmt.Printf("  %sTip: Enter link numbers like%s %s1%s %sor%s %s1, 3, 5%s %sor%s %s2-6%s %sor%s %sA%s %s(or press%s %s[Esc]%s %sto return).%s\n",
+			TextMuted, Reset,
+			Bold+AccentTeal, Reset,
+			TextMuted, Reset,
+			Bold+AccentTeal, Reset,
+			TextMuted, Reset,
+			Bold+AccentTeal, Reset,
+			TextMuted, Reset,
+			Bold+AccentGreen, Reset,
+			TextMuted, Reset,
+			Bold+AccentAmber, Reset,
+			TextMuted, Reset)
+		if totalPages > 1 {
+			fmt.Printf("  %sInfo: You can type any link number%s %s1–%d%s %sfrom any page without flipping pages first.%s\n",
+				TextMuted, Reset,
+				Bold+TextMain, totalLinks, Reset,
+				TextMuted, Reset)
+		}
+
+		var promptParts []string
+		promptParts = append(promptParts, fmt.Sprintf("1-%d", totalLinks))
+		if currentPage < totalPages {
+			promptParts = append(promptParts, "N=Next Page")
+		}
+		if currentPage > 1 {
+			promptParts = append(promptParts, "P=Prev Page")
+		}
+		promptParts = append(promptParts, "A", "Esc")
+		promptHint := strings.Join(promptParts, ", ")
+
+		inp, ok := readTextWithEscAndAbort(
+			fmt.Sprintf("\n  %sSelect link(s) to decrypt [%s]: %s", AccentTeal, promptHint, Reset),
+			func() bool { return isPageClosed(b, activeContainerPage) },
+		)
+		if !ok || isPageClosed(b, activeContainerPage) {
+			return nil, false
+		}
+		if inp == "" || strings.EqualFold(inp, "B") || strings.EqualFold(inp, "ESC") {
+			return nil, false
+		}
+		if totalPages > 1 && (strings.EqualFold(inp, "N") || strings.EqualFold(inp, "NEXT")) {
+			if currentPage < totalPages {
+				currentPage++
+			} else {
+				warningMsg = fmt.Sprintf("%s! You are already on the last page (Page %d of %d). Press [P] for Previous Page.%s", AccentAmber, currentPage, totalPages, Reset)
+			}
+			continue
+		}
+		if totalPages > 1 && (strings.EqualFold(inp, "P") || strings.EqualFold(inp, "PREV")) {
+			if currentPage > 1 {
+				currentPage--
+			} else {
+				warningMsg = fmt.Sprintf("%s! You are already on the first page (Page 1 of %d). Press [N] for Next Page.%s", AccentAmber, totalPages, Reset)
+			}
+			continue
+		}
+
+		indices, err := parseLinkSelectionInput(inp, totalLinks)
+		if err != nil {
+			warningMsg = fmt.Sprintf("%s! Invalid selection: %v. Try e.g. 1 or 1,3,5 or 2-4 or A.%s", AccentAmber, err, Reset)
+			continue
+		}
+
+		var chosen []RowInfo
+		for _, num := range indices {
+			chosen = append(chosen, orderedRows[num-1])
+		}
+		return chosen, true
+	}
+
+	return nil, false
 }
 
 // ==============================================================================
@@ -3330,10 +3772,16 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 	session.mu.Unlock()
 
 	decryptedStatus := make(map[string][2]int)
+	decryptedRowURLs := make(map[int]string)
 	harvestedCache := make(map[int]string)
 	workerHolder := &WorkerHolder{}
 	var lastActionBanners []string
 	var lastDecryptedBatches []HostBatch
+
+	type hostJob struct {
+		Host string
+		Rows []RowInfo
+	}
 
 	for !isPageClosed(b, activeContainerPage) {
 		session.SetPhase("IDLE")
@@ -3411,7 +3859,11 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 
 			statusBadge := TextMuted + "Pending" + Reset
 			if st, ok := decryptedStatus[h]; ok {
-				statusBadge = fmt.Sprintf("%s✓ Decrypted (%d/%d)%s", Bold+AccentGreen, st[0], st[1], Reset)
+				if st[0] >= st[1] {
+					statusBadge = fmt.Sprintf("%s✓ Decrypted (%d/%d)%s", Bold+AccentGreen, st[0], st[1], Reset)
+				} else {
+					statusBadge = fmt.Sprintf("%s◐ Partial (%d/%d)%s", Bold+AccentAmber, st[0], st[1], Reset)
+				}
 			}
 
 			hostStyle := TextMuted
@@ -3428,7 +3880,14 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 			}})
 		}
 
-		allDone := len(decryptedStatus) == len(hostList)
+		allDone := len(hostList) > 0
+		for _, h := range hostList {
+			st, ok := decryptedStatus[h]
+			if !ok || st[0] < st[1] {
+				allDone = false
+				break
+			}
+		}
 		allDoneBadge := ""
 		if allDone {
 			allDoneBadge = Bold + AccentGreen + "✓ All Complete" + Reset
@@ -3441,6 +3900,13 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 			fmt.Sprintf("%s%d links%s", TextMuted, len(rows), Reset),
 			"",
 			allDoneBadge,
+		}})
+		tblRows = append(tblRows, tableRow{Cells: []string{
+			Bold + AccentLavender + "[L]" + Reset,
+			TextMain + "Select Specific Links" + Reset,
+			fmt.Sprintf("%s%d links%s", TextMuted, len(rows), Reset),
+			TextMuted + "Pick specific files (e.g. 1, 3, 4-6)" + Reset,
+			"",
 		}})
 		if len(lastDecryptedBatches) > 0 {
 			tblRows = append(tblRows, tableRow{Cells: []string{
@@ -3482,11 +3948,11 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 
 		printPanel(renderTable(cols, tblRows, false, UIWidth-4), "", BorderSubtle, 0, 1)
 
-		validKeys := []string{"A", "N", "O", "S", "Q"}
-		promptKeys := fmt.Sprintf("1-%d, A, N, O, S, Q", len(hostList))
+		validKeys := []string{"A", "L", "N", "O", "S", "Q"}
+		promptKeys := fmt.Sprintf("1-%d, A, L, N, O, S, Q", len(hostList))
 		if len(lastDecryptedBatches) > 0 {
 			validKeys = append(validKeys, "C")
-			promptKeys = fmt.Sprintf("1-%d, A, C, N, O, S, Q", len(hostList))
+			promptKeys = fmt.Sprintf("1-%d, A, L, C, N, O, S, Q", len(hostList))
 		}
 
 		choice := waitForSingleKey(
@@ -3540,11 +4006,54 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 			continue
 		}
 
-		var hostsToProcess []string
-		if choice == "A" {
-			hostsToProcess = hostList
+		var jobsToProcess []hostJob
+		isCustomLinkSelection := false
+
+		if choice == "L" {
+			chosenRows, ok := promptIndividualLinkSelection(
+				b,
+				activeContainerPage,
+				containerTitle,
+				hostList,
+				hostsMap,
+				decryptedRowURLs,
+				cfg,
+			)
+			if isPageClosed(b, activeContainerPage) {
+				safeCloseBrowser(session)
+				return "BROWSER_CLOSED"
+			}
+			if !ok || len(chosenRows) == 0 {
+				continue
+			}
+			isCustomLinkSelection = true
+			groupedByHost := make(map[string][]RowInfo)
+			var selectedHostOrder []string
+			for _, r := range chosenRows {
+				if _, exists := groupedByHost[r.Host]; !exists {
+					selectedHostOrder = append(selectedHostOrder, r.Host)
+				}
+				groupedByHost[r.Host] = append(groupedByHost[r.Host], r)
+			}
+			for _, h := range selectedHostOrder {
+				jobsToProcess = append(jobsToProcess, hostJob{
+					Host: h,
+					Rows: groupedByHost[h],
+				})
+			}
+		} else if choice == "A" {
+			for _, h := range hostList {
+				jobsToProcess = append(jobsToProcess, hostJob{
+					Host: h,
+					Rows: hostsMap[h],
+				})
+			}
 		} else if idx, err := strconv.Atoi(choice); err == nil && idx >= 1 && idx <= len(hostList) {
-			hostsToProcess = []string{hostList[idx-1]}
+			h := hostList[idx-1]
+			jobsToProcess = []hostJob{{
+				Host: h,
+				Rows: hostsMap[h],
+			}}
 		} else {
 			lastActionBanners = []string{
 				fmt.Sprintf("%s! Invalid key '%s'. Please try again.%s", AccentAmber, choice, Reset),
@@ -3554,13 +4063,15 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 
 		skipOffline := cfg.GetBool("Behavior", "skip_offline_links", false)
 		reqDelay := cfg.GetFloat("Behavior", "request_delay", 0.2)
+		copyClip := cfg.GetBool("Output", "copy_to_clipboard", false)
 		lastActionBanners = nil
 		lastDecryptedBatches = nil
+		var allBatchURLsForClipboard []string
 
 		userCancelledBatch := false
 		browserClosedDuringBatch := false
 
-		for _, targetHost := range hostsToProcess {
+		for _, job := range jobsToProcess {
 			if userCancelledBatch || browserClosedDuringBatch {
 				break
 			}
@@ -3569,8 +4080,12 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 				break
 			}
 
-			selectedRows := hostsMap[targetHost]
-			if skipOffline {
+			targetHost := job.Host
+			selectedRows := job.Rows
+
+			// Apply skip_offline_links only on bulk host selection (when the user explicitly
+			// picked specific links via [L], respect their exact selection).
+			if skipOffline && !isCustomLinkSelection {
 				var filtered []RowInfo
 				for _, r := range selectedRows {
 					if r.IsOnline {
@@ -3599,6 +4114,7 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 			drainKeyboardBuffer()
 
 			type harvestedItem struct {
+				RowIndex int
 				Filename string
 				Size     string
 				LinkURL  string
@@ -3615,6 +4131,13 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 					if isPageClosed(b, activeContainerPage) {
 						browserClosedDuringBatch = true
 						break
+					}
+					// If this row was already fully decrypted earlier in the session,
+					// we don't even need to re-harvest its intermediate /Link/ URL.
+					if _, alreadyDecrypted := decryptedRowURLs[row.Index]; alreadyDecrypted {
+						harvestedLinks = append(harvestedLinks, harvestedItem{row.Index, row.Filename, row.Size, "CACHED"})
+						renderProgressBarLine(idx+1, len(selectedRows), idx+1)
+						continue
 					}
 					linkURL, cached := harvestedCache[row.Index]
 					if !cached {
@@ -3635,7 +4158,7 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 						}
 					}
 					if linkURL != "" {
-						harvestedLinks = append(harvestedLinks, harvestedItem{row.Filename, row.Size, linkURL})
+						harvestedLinks = append(harvestedLinks, harvestedItem{row.Index, row.Filename, row.Size, linkURL})
 					}
 					renderProgressBarLine(idx+1, len(selectedRows), idx+1)
 				}
@@ -3649,6 +4172,10 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 					if isPageClosed(b, activeContainerPage) {
 						browserClosedDuringBatch = true
 						break
+					}
+					if _, alreadyDecrypted := decryptedRowURLs[row.Index]; alreadyDecrypted {
+						harvestedLinks = append(harvestedLinks, harvestedItem{row.Index, row.Filename, row.Size, "CACHED"})
+						continue
 					}
 					linkURL, cached := harvestedCache[row.Index]
 					if !cached {
@@ -3665,7 +4192,7 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 					}
 					if linkURL != "" {
 						harvestedCache[row.Index] = linkURL
-						harvestedLinks = append(harvestedLinks, harvestedItem{row.Filename, row.Size, linkURL})
+						harvestedLinks = append(harvestedLinks, harvestedItem{row.Index, row.Filename, row.Size, linkURL})
 					}
 				}
 			}
@@ -3690,6 +4217,15 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 					browserClosedDuringBatch = true
 					break
 				}
+				// Reuse already-resolved URL if decrypted earlier in this session
+				if cachedFinal, ok := decryptedRowURLs[item.RowIndex]; ok && cachedFinal != "" {
+					printResolvedItem(i+1, len(harvestedLinks), item.Filename, cachedFinal, true)
+					extractedForHost = append(extractedForHost, ExtractedURL{item.Filename, cachedFinal})
+					displayItemsForHost = append(displayItemsForHost, DisplayBatchItem{item.Filename, cachedFinal, true})
+					allBatchURLsForClipboard = append(allBatchURLsForClipboard, cachedFinal)
+					continue
+				}
+
 				setWindowTitle(fmt.Sprintf("[%02d/%02d] Decrypting %s — %s", i+1, len(harvestedLinks), targetHost, containerTitle))
 				finalURL, rErr := resolveLinkSmart(
 					session,
@@ -3711,8 +4247,10 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 					break
 				}
 				if finalURL != "" {
+					decryptedRowURLs[item.RowIndex] = finalURL
 					extractedForHost = append(extractedForHost, ExtractedURL{item.Filename, finalURL})
 					displayItemsForHost = append(displayItemsForHost, DisplayBatchItem{item.Filename, finalURL, true})
+					allBatchURLsForClipboard = append(allBatchURLsForClipboard, finalURL)
 				} else {
 					displayItemsForHost = append(displayItemsForHost, DisplayBatchItem{
 						item.Filename,
@@ -3747,16 +4285,21 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 			}
 
 			if len(extractedForHost) > 0 {
-				if len(extractedForHost) == len(hostsMap[targetHost]) {
-					for i := range hostsMap[targetHost] {
-						hostsMap[targetHost][i].IsOnline = true
+				totalHostRows := len(hostsMap[targetHost])
+				// Build cumulative decrypted URLs for this host in container order so partial
+				// selections via [L] merge into the host's .txt file instead of overwriting it.
+				var cumulativeForHost []ExtractedURL
+				for idxRow, r := range hostsMap[targetHost] {
+					if u, ok := decryptedRowURLs[r.Index]; ok && u != "" {
+						cumulativeForHost = append(cumulativeForHost, ExtractedURL{r.Filename, u})
+						hostsMap[targetHost][idxRow].IsOnline = true
 					}
 				}
-				bannerMsg := saveHostURLs(targetHost, containerTitle, containerURL, extractedForHost, cfg)
+				bannerMsg := saveHostURLs(targetHost, containerTitle, containerURL, cumulativeForHost, cfg)
 				if bannerMsg != "" {
 					lastActionBanners = append(lastActionBanners, bannerMsg)
 				}
-				decryptedStatus[targetHost] = [2]int{len(extractedForHost), len(selectedRows)}
+				decryptedStatus[targetHost] = [2]int{len(cumulativeForHost), totalHostRows}
 			} else if !userCancelledBatch && !browserClosedDuringBatch {
 				lastActionBanners = append(lastActionBanners,
 					fmt.Sprintf("%s! No final URLs were extracted for [%s].%s", AccentCoral, targetHost, Reset))
@@ -3766,6 +4309,15 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 				lastActionBanners = append(lastActionBanners,
 					fmt.Sprintf("%s! Decryption cancelled by user ([Esc] / [X]). Returned to Host Selection.%s", AccentAmber, Reset))
 				break
+			}
+		}
+
+		// Perform automatic clipboard copy once across the entire batch so multi-host selections
+		// via [L] or [A] copy all extracted URLs together instead of overwriting per host.
+		if copyClip && len(allBatchURLsForClipboard) > 0 {
+			if copyTextToClipboard(strings.Join(allBatchURLsForClipboard, "\n")) {
+				lastActionBanners = append(lastActionBanners,
+					fmt.Sprintf("%s✓ Auto-copied %d decrypted URL(s) to Windows Clipboard!%s", Bold+AccentMauve, len(allBatchURLsForClipboard), Reset))
 			}
 		}
 
