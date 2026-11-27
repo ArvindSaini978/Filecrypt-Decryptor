@@ -62,6 +62,7 @@ const (
 	AppLicense       = "GPL-3.0 License"
 	AppLicenseURL    = "https://github.com/ArvindSaini978/Filecrypt-Decryptor/blob/master/LICENSE"
 	AppYear          = "2026"
+	AppDataFolder    = "FilecryptDecryptor"
 )
 
 // ==============================================================================
@@ -84,7 +85,8 @@ const (
 )
 
 var (
-	AppDir     string
+	AppDir     string // Directory where the executable resides (used for ./decrypted_links)
+	AppDataDir string // %APPDATA%\FilecryptDecryptor (used for config.ini and browser_profile)
 	ConfigPath string
 	ansiRegex  = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
@@ -98,6 +100,44 @@ var (
 		IdleConnTimeout:     60 * time.Second,
 	}
 )
+
+// resolveSaveDir resolves save_directory relative to AppDir (next to the .exe) unless an
+// absolute path was configured by the user.
+func resolveSaveDir(cfg *AppConfig) string {
+	raw := strings.TrimSpace(cfg.Get("Output", "save_directory", "./decrypted_links"))
+	if raw == "" {
+		raw = "./decrypted_links"
+	}
+	if filepath.IsAbs(raw) {
+		if abs, err := filepath.Abs(raw); err == nil {
+			return abs
+		}
+		return raw
+	}
+	if abs, err := filepath.Abs(filepath.Join(AppDir, raw)); err == nil {
+		return abs
+	}
+	return filepath.Join(AppDir, raw)
+}
+
+// resolveProfileDir resolves profile_directory relative to AppDataDir (%APPDATA%\FilecryptDecryptor)
+// unless an absolute path was configured by the user.
+func resolveProfileDir(cfg *AppConfig) string {
+	raw := strings.TrimSpace(cfg.Get("Session", "profile_directory", "./browser_profile"))
+	if raw == "" {
+		raw = "./browser_profile"
+	}
+	if filepath.IsAbs(raw) {
+		if abs, err := filepath.Abs(raw); err == nil {
+			return abs
+		}
+		return raw
+	}
+	if abs, err := filepath.Abs(filepath.Join(AppDataDir, raw)); err == nil {
+		return abs
+	}
+	return filepath.Join(AppDataDir, raw)
+}
 
 // ==============================================================================
 // WINDOWS NATIVE CONSOLE & MSVCRT FFI
@@ -829,7 +869,7 @@ func renderTable(cols []tableCol, rows []tableRow, heavyHeader bool, totalInnerW
 // HEADER, PREVIEW, AND INFO PANELS
 // ==============================================================================
 
-func printAppHeader(breadcrumbPath string, _ *AppConfig, clear bool, windowSubtitle string) {
+func printAppHeader(breadcrumbPath string, clear bool, windowSubtitle string) {
 	if clear {
 		clearScreen()
 	}
@@ -1118,7 +1158,7 @@ var DefaultConfigMap = map[string]map[string]string{
 	},
 	"Session": {
 		"keep_session_across_containers": "true",
-		"profile_directory":              "./chrome_filecrypt_profile",
+		"profile_directory":              "./browser_profile",
 	},
 	"Behavior": {
 		"resolve_mode":       "invisible",
@@ -1202,6 +1242,7 @@ func (c *AppConfig) Set(sec, key, val string) {
 }
 
 func writeCleanConfigFile(cfg *AppConfig) {
+	_ = os.MkdirAll(AppDataDir, 0755)
 	content := fmt.Sprintf(`# ====================================================================
 # FILECRYPT DECRYPTOR %s - CONFIGURATION FILE
 # Author     : %s
@@ -1224,7 +1265,7 @@ debug_mode = %s
 # Allowed: true, false  (Set to false if you only want to copy/paste links without saving .txt files to disk)
 save_to_file = %s
 
-# Folder where decrypted .txt files are saved (when save_to_file = true)
+# Folder where decrypted .txt files are saved (relative to the .exe folder, or an absolute path)
 save_directory = %s
 
 # Allowed: true, false  (Recommended: false so your clipboard isn't overwritten unexpectedly)
@@ -1238,7 +1279,7 @@ include_container_title_in_filename = %s
 # Note: Closing the browser window always ends Filecrypt's temporary PHPSESSID session cookie.
 keep_session_across_containers = %s
 
-# Folder where browser profile is stored
+# Folder where browser profile is stored (inside %%APPDATA%%\%s, or an absolute path)
 profile_directory = %s
 
 [Behavior]
@@ -1263,7 +1304,8 @@ request_delay = %s
 		cfg.Get("Output", "copy_to_clipboard", "false"),
 		cfg.Get("Output", "include_container_title_in_filename", "true"),
 		cfg.Get("Session", "keep_session_across_containers", "true"),
-		cfg.Get("Session", "profile_directory", "./chrome_filecrypt_profile"),
+		AppDataFolder,
+		cfg.Get("Session", "profile_directory", "./browser_profile"),
 		cfg.Get("Behavior", "resolve_mode", "invisible"),
 		cfg.Get("Behavior", "skip_offline_links", "false"),
 		cfg.Get("Behavior", "request_delay", "0.2"),
@@ -1326,19 +1368,6 @@ func validateAndLoadConfig() *AppConfig {
 		}
 
 		if len(errs) == 0 {
-			migrated := false
-			if cfg.HasSection("Session") && !cfg.HasOption("Session", "keep_session_across_containers") {
-				cfg.Set("Session", "keep_session_across_containers", "true")
-				migrated = true
-			}
-			if cfg.HasSection("Output") && !cfg.HasOption("Output", "save_to_file") {
-				cfg.Set("Output", "save_to_file", "true")
-				migrated = true
-			}
-			if migrated {
-				writeCleanConfigFile(cfg)
-			}
-
 			sectionsOrder := []string{"General", "Output", "Session", "Behavior"}
 			for _, sec := range sectionsOrder {
 				keys := DefaultConfigMap[sec]
@@ -1808,9 +1837,9 @@ func waitForSingleKey(prompt string, validLetters []string, maxNum int, abortChe
 // INTERACTIVE MENUS: ABOUT/LICENSE & SETTINGS
 // ==============================================================================
 
-func showAboutLicenseScreen(cfg *AppConfig) {
+func showAboutLicenseScreen() {
 	for {
-		printAppHeader("App / About & License", cfg, true, "")
+		printAppHeader("App / About & License", true, "")
 
 		aboutLines := []string{
 			Bold + AccentTeal + AppTitle + " " + AppVersion + Reset,
@@ -1856,7 +1885,7 @@ func chooseSettingOptionSubmenu(cfg *AppConfig, settingID string, parentPath str
 	meta := SettingsMetadata[settingID]
 	currentVal := strings.ToLower(strings.TrimSpace(cfg.Get(meta.Section, meta.Key, "")))
 
-	printAppHeader(fmt.Sprintf("%s / %s", parentPath, meta.Title), cfg, true, "")
+	printAppHeader(fmt.Sprintf("%s / %s", parentPath, meta.Title), true, "")
 
 	infoLines := []string{
 		Bold + TextMain + meta.Title + Reset,
@@ -1920,7 +1949,7 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 	settingsPath := fmt.Sprintf("%s / Settings", parentPath)
 
 	for {
-		printAppHeader(settingsPath, cfg, true, "")
+		printAppHeader(settingsPath, true, "")
 
 		if statusBanner != "" {
 			printPanel([]string{"  " + statusBanner}, "", AccentGreen, 0, 1)
@@ -1977,7 +2006,7 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 		// 4. Save to .txt File
 		saveFileOn := cfg.GetBool("Output", "save_to_file", true)
 		saveFileVal := Bold + AccentAmber + "NO" + Reset
-		saveFileNote := AccentAmber + "Console & Clipboard only (No files on disk)" + Reset
+		saveFileNote := AccentAmber + "Console & Clipboard only (No .txt)" + Reset
 		if saveFileOn {
 			saveFileVal = Bold + AccentGreen + "YES" + Reset
 			saveFileNote = TextMuted + "Save .txt files to disk (Recommended)" + Reset
@@ -2095,8 +2124,8 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 				statusBanner = msg
 			}
 		} else if key == "9" {
-			printAppHeader(fmt.Sprintf("%s / Save Directory", settingsPath), cfg, true, "")
-			absSaveDir, _ := filepath.Abs(filepath.Join(AppDir, saveDir))
+			printAppHeader(fmt.Sprintf("%s / Save Directory", settingsPath), true, "")
+			absSaveDir := resolveSaveDir(cfg)
 			dirPanel := []string{
 				TextMuted + "Current Folder:" + Reset + "  " + Bold + AccentTeal + absSaveDir + Reset,
 				TextMuted + "Instructions  :" + Reset + "  Type or paste a new folder path and press " + Bold + AccentGreen + "Enter" + Reset + ", or press " + Bold + AccentAmber + "Esc" + Reset + " to cancel.",
@@ -2111,7 +2140,7 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 				statusBanner = TextMuted + "Save directory change cancelled." + Reset
 			}
 		} else if key == "R" {
-			printAppHeader(fmt.Sprintf("%s / Reset Defaults", settingsPath), cfg, true, "")
+			printAppHeader(fmt.Sprintf("%s / Reset Defaults", settingsPath), true, "")
 			confirm := waitForSingleKey(
 				fmt.Sprintf("\n  %sReset ALL settings to recommended defaults? [Y / N / Esc]: %s", AccentAmber, Reset),
 				[]string{"Y", "N"},
@@ -2223,16 +2252,15 @@ type ContainerInfo struct {
 }
 
 type SessionHolder struct {
-	mu              sync.Mutex
-	Launcher        *launcher.Launcher
-	ProfileDir      string
-	Browser         *rod.Browser
-	KeepalivePage   *rod.Page
-	BrowserName     string
-	Phase           string
-	MainContainerID proto.TargetTargetID
-	CaptureLinkCh   chan string
-	UserAgent       string
+	mu            sync.Mutex
+	Launcher      *launcher.Launcher
+	ProfileDir    string
+	Browser       *rod.Browser
+	KeepalivePage *rod.Page
+	BrowserName   string
+	Phase         string
+	CaptureLinkCh chan string
+	UserAgent     string
 }
 
 func (s *SessionHolder) SetPhase(phase string) {
@@ -2513,8 +2541,7 @@ func ensureBrowserSession(session *SessionHolder, cfg *AppConfig) (*rod.Browser,
 			return nil, nil, errors.New("no compatible browser (Chrome, Edge, Brave, Chromium) found on this PC")
 		}
 
-		relProfile := strings.TrimSpace(cfg.Get("Session", "profile_directory", "./chrome_filecrypt_profile"))
-		profileDir, _ := filepath.Abs(filepath.Join(AppDir, relProfile))
+		profileDir := resolveProfileDir(cfg)
 
 		logMsg(fmt.Sprintf("Launching Browser (%s)...", exePath), "INFO", cfg)
 
@@ -3424,7 +3451,7 @@ func saveHostURLs(hostName, containerTitle, containerURL string, extractedURLs [
 			TextMuted, Reset)
 	}
 
-	saveDir, _ := filepath.Abs(filepath.Join(AppDir, cfg.Get("Output", "save_directory", "./decrypted_links")))
+	saveDir := resolveSaveDir(cfg)
 	useTitle := cfg.GetBool("Output", "include_container_title_in_filename", true)
 
 	_ = os.MkdirAll(saveDir, 0755)
@@ -3527,7 +3554,6 @@ func promptIndividualLinkSelection(
 		}
 		printAppHeader(
 			breadcrumb,
-			cfg,
 			!isDebug(cfg),
 			fmt.Sprintf("Select Links — %s", containerTitle),
 		)
@@ -3730,7 +3756,6 @@ func promptIndividualLinkSelection(
 func processSingleContainer(containerURL string, cfg *AppConfig, session *SessionHolder) string {
 	printAppHeader(
 		"App / Container / Loading & Security Check",
-		cfg,
 		!isDebug(cfg),
 		"Loading Container...",
 	)
@@ -3819,10 +3844,7 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 		hostsMap[r.Host] = append(hostsMap[r.Host], r)
 	}
 
-	session.mu.Lock()
-	session.Phase = "IDLE"
-	session.MainContainerID = activeContainerPage.TargetID
-	session.mu.Unlock()
+	session.SetPhase("IDLE")
 
 	decryptedStatus := make(map[string][2]int)
 	decryptedRowURLs := make(map[int]string)
@@ -3841,7 +3863,6 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 
 		printAppHeader(
 			"App / Container / Host Selection",
-			cfg,
 			!isDebug(cfg),
 			containerTitle,
 		)
@@ -4048,7 +4069,7 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 			}
 			continue
 		} else if choice == "O" {
-			saveDir, _ := filepath.Abs(filepath.Join(AppDir, cfg.Get("Output", "save_directory", "./decrypted_links")))
+			saveDir := resolveSaveDir(cfg)
 			openFolderInExplorer(saveDir)
 			lastActionBanners = []string{
 				fmt.Sprintf("%s✓ Opened folder in Explorer:%s %s%s%s", AccentGreen, Reset, AccentTeal, saveDir, Reset),
@@ -4158,7 +4179,6 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 
 			printAppHeader(
 				fmt.Sprintf("App / Container / Decrypting (%s)", targetHost),
-				cfg,
 				!isDebug(cfg),
 				fmt.Sprintf("Decrypting %s (%d links)...", targetHost, len(selectedRows)),
 			)
@@ -4169,7 +4189,6 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 			type harvestedItem struct {
 				RowIndex int
 				Filename string
-				Size     string
 				LinkURL  string
 			}
 			var harvestedLinks []harvestedItem
@@ -4188,7 +4207,7 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 					// If this row was already fully decrypted earlier in the session,
 					// we don't even need to re-harvest its intermediate /Link/ URL.
 					if _, alreadyDecrypted := decryptedRowURLs[row.Index]; alreadyDecrypted {
-						harvestedLinks = append(harvestedLinks, harvestedItem{row.Index, row.Filename, row.Size, "CACHED"})
+						harvestedLinks = append(harvestedLinks, harvestedItem{row.Index, row.Filename, "CACHED"})
 						renderProgressBarLine(idx+1, len(selectedRows), idx+1)
 						continue
 					}
@@ -4211,7 +4230,7 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 						}
 					}
 					if linkURL != "" {
-						harvestedLinks = append(harvestedLinks, harvestedItem{row.Index, row.Filename, row.Size, linkURL})
+						harvestedLinks = append(harvestedLinks, harvestedItem{row.Index, row.Filename, linkURL})
 					}
 					renderProgressBarLine(idx+1, len(selectedRows), idx+1)
 				}
@@ -4227,7 +4246,7 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 						break
 					}
 					if _, alreadyDecrypted := decryptedRowURLs[row.Index]; alreadyDecrypted {
-						harvestedLinks = append(harvestedLinks, harvestedItem{row.Index, row.Filename, row.Size, "CACHED"})
+						harvestedLinks = append(harvestedLinks, harvestedItem{row.Index, row.Filename, "CACHED"})
 						continue
 					}
 					linkURL, cached := harvestedCache[row.Index]
@@ -4245,7 +4264,7 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 					}
 					if linkURL != "" {
 						harvestedCache[row.Index] = linkURL
-						harvestedLinks = append(harvestedLinks, harvestedItem{row.Index, row.Filename, row.Size, linkURL})
+						harvestedLinks = append(harvestedLinks, harvestedItem{row.Index, row.Filename, linkURL})
 					}
 				}
 			}
@@ -4404,7 +4423,14 @@ func main() {
 	if strings.Contains(strings.ToLower(AppDir), "go-build") {
 		AppDir, _ = os.Getwd()
 	}
-	ConfigPath = filepath.Join(AppDir, "config.ini")
+
+	if userCfgDir, err := os.UserConfigDir(); err == nil && userCfgDir != "" {
+		AppDataDir = filepath.Join(userCfgDir, AppDataFolder)
+	} else {
+		AppDataDir = AppDir
+	}
+	_ = os.MkdirAll(AppDataDir, 0755)
+	ConfigPath = filepath.Join(AppDataDir, "config.ini")
 
 	sessionHolder := &SessionHolder{
 		Phase: "LOAD_CONTAINER",
@@ -4424,7 +4450,7 @@ func main() {
 
 	for {
 		cfg := validateAndLoadConfig()
-		printAppHeader("App / Home", cfg, !isDebug(cfg), "Home")
+		printAppHeader("App / Home", !isDebug(cfg), "Home")
 
 		if homeWarning != "" {
 			printPanel([]string{"  " + homeWarning}, "", AccentAmber, 0, 1)
@@ -4465,11 +4491,10 @@ func main() {
 			interactiveSettingsMenu(cfg, "App")
 			continue
 		} else if cmd == "I" {
-			showAboutLicenseScreen(cfg)
+			showAboutLicenseScreen()
 			continue
 		} else if cmd == "O" {
-			saveDir, _ := filepath.Abs(filepath.Join(AppDir, cfg.Get("Output", "save_directory", "./decrypted_links")))
-			openFolderInExplorer(saveDir)
+			openFolderInExplorer(resolveSaveDir(cfg))
 			continue
 		}
 
