@@ -891,6 +891,7 @@ func renderSettingsPreviewPanel(cfg *AppConfig) {
 	bName := strings.ToUpper(cfg.Get("General", "browser", "chrome"))
 	dbgOn := cfg.GetBool("General", "debug_mode", false)
 	invis := cfg.Get("Behavior", "resolve_mode", "invisible") == "invisible"
+	saveFileOn := cfg.GetBool("Output", "save_to_file", true)
 	clipOn := cfg.GetBool("Output", "copy_to_clipboard", false)
 	keepOn := cfg.GetBool("Session", "keep_session_across_containers", true)
 	skipOn := cfg.GetBool("Behavior", "skip_offline_links", false)
@@ -903,10 +904,15 @@ func renderSettingsPreviewPanel(cfg *AppConfig) {
 	if invis {
 		resStr = Bold + AccentTeal + "INVISIBLE" + Reset
 	}
-	clipStr := TextMuted + "NO" + Reset
-	if clipOn {
-		clipStr = Bold + AccentGreen + "YES" + Reset
+	saveStr := Bold + AccentAmber + "OFF" + Reset
+	if saveFileOn {
+		saveStr = Bold + AccentGreen + "TXT" + Reset
 	}
+	clipStr := TextMuted + "OFF" + Reset
+	if clipOn {
+		clipStr = Bold + AccentGreen + "ON" + Reset
+	}
+	outModeStr := saveStr + TextMuted + " / Clip: " + Reset + clipStr
 	sessStr := Bold + AccentAmber + "RESET EACH" + Reset
 	if keepOn {
 		sessStr = Bold + AccentGreen + "KEEP ALIVE" + Reset
@@ -923,7 +929,7 @@ func renderSettingsPreviewPanel(cfg *AppConfig) {
 	row1Col2 := padRight(TextMuted+"Resolver   :"+Reset+" "+resStr, colW)
 	row1Col3 := padRight(TextMuted+"Session Mode :"+Reset+" "+sessStr, innerContentWidth-(colW*2))
 
-	row2Col1 := padRight(TextMuted+"Auto-Copy    :"+Reset+" "+clipStr, colW)
+	row2Col1 := padRight(TextMuted+"Save / Copy  :"+Reset+" "+outModeStr, colW)
 	row2Col2 := padRight(TextMuted+"Debug Logs :"+Reset+" "+dbgStr, colW)
 	row2Col3 := padRight(TextMuted+"Skip Offline :"+Reset+" "+skipStr, innerContentWidth-(colW*2))
 
@@ -1039,17 +1045,29 @@ var SettingsMetadata = map[string]SettingMeta{
 	"4": {
 		ID:      "4",
 		Section: "Output",
-		Key:     "copy_to_clipboard",
-		Title:   "Auto-Copy Decrypted URLs to Clipboard",
-		Info:    "Automatically copies decrypted URLs to your Windows Clipboard when a host finishes.",
-		Warning: "If YES, whatever text you currently have copied in your clipboard will be overwritten.",
+		Key:     "save_to_file",
+		Title:   "Save Decrypted URLs to .txt File",
+		Info:    "Controls whether decrypted URLs are saved as .txt files on your disk.",
+		Warning: "Turn OFF if you only want to copy/paste links from the console or clipboard without leaving files on disk.",
 		Options: []SettingOption{
-			{"false", "NO", "Only save to .txt file, do NOT touch my clipboard (Recommended Default)"},
-			{"true", "YES", "Copy decrypted URLs to Windows Clipboard automatically"},
+			{"true", "YES", "Save decrypted URLs to .txt files in your Save Directory (Recommended)"},
+			{"false", "NO", "Do NOT save files to disk (Show in console & use [C] / Auto-Copy only)"},
 		},
 	},
 	"5": {
 		ID:      "5",
+		Section: "Output",
+		Key:     "copy_to_clipboard",
+		Title:   "Auto-Copy Decrypted URLs to Clipboard",
+		Info:    "Automatically copies decrypted URLs to your Windows Clipboard when decryption finishes.",
+		Warning: "If YES, whatever text you currently have copied in your clipboard will be overwritten.",
+		Options: []SettingOption{
+			{"false", "NO", "Do NOT touch my clipboard automatically (You can still press [C] manually)"},
+			{"true", "YES", "Copy decrypted URLs to Windows Clipboard automatically"},
+		},
+	},
+	"6": {
+		ID:      "6",
 		Section: "Output",
 		Key:     "include_container_title_in_filename",
 		Title:   "Include Container Title in Saved Filename",
@@ -1060,8 +1078,8 @@ var SettingsMetadata = map[string]SettingMeta{
 			{"false", "NO", "Save as 'decrypted_<Host>.txt' (Warning: Overwrites previous file for same host!)"},
 		},
 	},
-	"6": {
-		ID:      "6",
+	"7": {
+		ID:      "7",
 		Section: "Session",
 		Key:     "keep_session_across_containers",
 		Title:   "Session Persistence Across Containers ('N')",
@@ -1072,8 +1090,8 @@ var SettingsMetadata = map[string]SettingMeta{
 			{"false", "RESET EACH", "Clear Cookies & Start Fresh on Every New Container (Forces New Captcha)"},
 		},
 	},
-	"7": {
-		ID:      "7",
+	"8": {
+		ID:      "8",
 		Section: "Behavior",
 		Key:     "skip_offline_links",
 		Title:   "Skip Offline / Dead Links",
@@ -1093,6 +1111,7 @@ var DefaultConfigMap = map[string]map[string]string{
 		"debug_mode":      "false",
 	},
 	"Output": {
+		"save_to_file":                        "true",
 		"save_directory":                      "./decrypted_links",
 		"copy_to_clipboard":                   "false",
 		"include_container_title_in_filename": "true",
@@ -1202,7 +1221,10 @@ executable_path = %s
 debug_mode = %s
 
 [Output]
-# Folder where decrypted .txt files are saved
+# Allowed: true, false  (Set to false if you only want to copy/paste links without saving .txt files to disk)
+save_to_file = %s
+
+# Folder where decrypted .txt files are saved (when save_to_file = true)
 save_directory = %s
 
 # Allowed: true, false  (Recommended: false so your clipboard isn't overwritten unexpectedly)
@@ -1236,6 +1258,7 @@ request_delay = %s
 		cfg.Get("General", "browser", "chrome"),
 		cfg.Get("General", "executable_path", ""),
 		cfg.Get("General", "debug_mode", "false"),
+		cfg.Get("Output", "save_to_file", "true"),
 		cfg.Get("Output", "save_directory", "./decrypted_links"),
 		cfg.Get("Output", "copy_to_clipboard", "false"),
 		cfg.Get("Output", "include_container_title_in_filename", "true"),
@@ -1303,8 +1326,16 @@ func validateAndLoadConfig() *AppConfig {
 		}
 
 		if len(errs) == 0 {
+			migrated := false
 			if cfg.HasSection("Session") && !cfg.HasOption("Session", "keep_session_across_containers") {
 				cfg.Set("Session", "keep_session_across_containers", "true")
+				migrated = true
+			}
+			if cfg.HasSection("Output") && !cfg.HasOption("Output", "save_to_file") {
+				cfg.Set("Output", "save_to_file", "true")
+				migrated = true
+			}
+			if migrated {
 				writeCleanConfigFile(cfg)
 			}
 
@@ -1322,7 +1353,7 @@ func validateAndLoadConfig() *AppConfig {
 				}
 			}
 
-			for _, id := range []string{"1", "2", "3", "4", "5", "6", "7"} {
+			for _, id := range []string{"1", "2", "3", "4", "5", "6", "7", "8"} {
 				meta := SettingsMetadata[id]
 				sec, k := meta.Section, meta.Key
 				if cfg.HasOption(sec, k) {
@@ -1678,6 +1709,7 @@ func parseLinkSelectionInput(input string, maxNum int) ([]int, error) {
 	}
 	return result, nil
 }
+
 func waitForSingleKey(prompt string, validLetters []string, maxNum int, abortCheckFn func() bool, allowEsc bool) string {
 	fmt.Print(prompt)
 
@@ -1942,22 +1974,37 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 			resNote,
 		}})
 
-		// 4. Clipboard
-		clipOn := cfg.GetBool("Output", "copy_to_clipboard", false)
-		clipVal := Bold + TextMain + "NO" + Reset
-		clipNote := TextMuted + "Save to .txt only (Recommended)" + Reset
-		if clipOn {
-			clipVal = Bold + AccentGreen + "YES" + Reset
-			clipNote = AccentAmber + "Overwrites Windows Clipboard" + Reset
+		// 4. Save to .txt File
+		saveFileOn := cfg.GetBool("Output", "save_to_file", true)
+		saveFileVal := Bold + AccentAmber + "NO" + Reset
+		saveFileNote := AccentAmber + "Console & Clipboard only (No files on disk)" + Reset
+		if saveFileOn {
+			saveFileVal = Bold + AccentGreen + "YES" + Reset
+			saveFileNote = TextMuted + "Save .txt files to disk (Recommended)" + Reset
 		}
 		rows = append(rows, tableRow{Cells: []string{
 			Bold + AccentTeal + "[4]" + Reset,
+			TextMain + "Save URLs to .txt File" + Reset,
+			saveFileVal,
+			saveFileNote,
+		}})
+
+		// 5. Clipboard
+		clipOn := cfg.GetBool("Output", "copy_to_clipboard", false)
+		clipVal := Bold + TextMain + "NO" + Reset
+		clipNote := TextMuted + "Manual copy via [C] (Recommended)" + Reset
+		if clipOn {
+			clipVal = Bold + AccentGreen + "YES" + Reset
+			clipNote = AccentAmber + "Auto-copies & overwrites Clipboard" + Reset
+		}
+		rows = append(rows, tableRow{Cells: []string{
+			Bold + AccentTeal + "[5]" + Reset,
 			TextMain + "Auto-Copy URLs to Clipboard" + Reset,
 			clipVal,
 			clipNote,
 		}})
 
-		// 5. Container Title in Filename
+		// 6. Container Title in Filename
 		titleOn := cfg.GetBool("Output", "include_container_title_in_filename", true)
 		titleVal := Bold + AccentCoral + "NO" + Reset
 		titleNote := AccentCoral + "Warning: Overwrites previous host file!" + Reset
@@ -1966,13 +2013,13 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 			titleNote = TextMuted + "'<Title>_<Host>.txt' (Recommended)" + Reset
 		}
 		rows = append(rows, tableRow{Cells: []string{
-			Bold + AccentTeal + "[5]" + Reset,
+			Bold + AccentTeal + "[6]" + Reset,
 			TextMain + "Include Container Title in File" + Reset,
 			titleVal,
 			titleNote,
 		}})
 
-		// 6. Session Mode
+		// 7. Session Mode
 		keepOn := cfg.GetBool("Session", "keep_session_across_containers", true)
 		keepVal := Bold + AccentAmber + "RESET EACH" + Reset
 		keepNote := AccentAmber + "Forces new Captcha on every URL" + Reset
@@ -1981,13 +2028,13 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 			keepNote = TextMuted + "Remembers solved Captchas while open" + Reset
 		}
 		rows = append(rows, tableRow{Cells: []string{
-			Bold + AccentTeal + "[6]" + Reset,
+			Bold + AccentTeal + "[7]" + Reset,
 			TextMain + "Session Mode on New Container" + Reset,
 			keepVal,
 			keepNote,
 		}})
 
-		// 7. Skip Offline
+		// 8. Skip Offline
 		skipOn := cfg.GetBool("Behavior", "skip_offline_links", false)
 		skipVal := Bold + TextMain + "NO" + Reset
 		skipNote := TextMuted + "Decrypts all links (Recommended)" + Reset
@@ -1996,16 +2043,16 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 			skipNote = AccentAmber + "Skips links marked Red" + Reset
 		}
 		rows = append(rows, tableRow{Cells: []string{
-			Bold + AccentTeal + "[7]" + Reset,
+			Bold + AccentTeal + "[8]" + Reset,
 			TextMain + "Skip Offline / Dead Links" + Reset,
 			skipVal,
 			skipNote,
 		}})
 
-		// 8. Save Directory
+		// 9. Save Directory
 		saveDir := cfg.Get("Output", "save_directory", "./decrypted_links")
 		rows = append(rows, tableRow{Cells: []string{
-			Bold + AccentTeal + "[8]" + Reset,
+			Bold + AccentTeal + "[9]" + Reset,
 			TextMain + "Change Save Directory" + Reset,
 			AccentTeal + saveDir + Reset,
 			TextMuted + "Output folder for .txt files" + Reset,
@@ -2035,9 +2082,9 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 		printPanel(tblLines, "", BorderSubtle, 0, 1)
 
 		key := waitForSingleKey(
-			fmt.Sprintf("\n  %sSelect a setting [1-8, R, E, Esc]: %s", AccentTeal, Reset),
+			fmt.Sprintf("\n  %sSelect a setting [1-9, R, E, Esc]: %s", AccentTeal, Reset),
 			[]string{"R", "E", "B", "Q"},
-			8, nil, true,
+			9, nil, true,
 		)
 
 		if key == "ESC" || key == "B" || key == "Q" || key == "" {
@@ -2047,7 +2094,7 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 			if msg != "" {
 				statusBanner = msg
 			}
-		} else if key == "8" {
+		} else if key == "9" {
 			printAppHeader(fmt.Sprintf("%s / Save Directory", settingsPath), cfg, true, "")
 			absSaveDir, _ := filepath.Abs(filepath.Join(AppDir, saveDir))
 			dirPanel := []string{
@@ -3371,6 +3418,12 @@ func saveHostURLs(hostName, containerTitle, containerURL string, extractedURLs [
 		return ""
 	}
 
+	if !cfg.GetBool("Output", "save_to_file", true) {
+		return fmt.Sprintf("%s✓ Extracted %d URLs for [%s]%s %s(File saving disabled — Press [C] to copy)%s",
+			Bold+AccentGreen, len(extractedURLs), hostName, Reset,
+			TextMuted, Reset)
+	}
+
 	saveDir, _ := filepath.Abs(filepath.Join(AppDir, cfg.Get("Output", "save_directory", "./decrypted_links")))
 	useTitle := cfg.GetBool("Output", "include_container_title_in_filename", true)
 
@@ -3935,7 +3988,7 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 			Bold + AccentMauve + "[S]" + Reset,
 			TextMain + "Application Settings" + Reset,
 			"",
-			TextMuted + "Browser, Debug, Cookies" + Reset,
+			TextMuted + "Browser, Debug, Save/Copy" + Reset,
 			"",
 		}})
 		tblRows = append(tblRows, tableRow{Cells: []string{
