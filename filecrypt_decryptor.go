@@ -111,6 +111,11 @@ var (
 	procSetConsoleOutputCP         = kernel32.NewProc("SetConsoleOutputCP")
 	procSetConsoleCP               = kernel32.NewProc("SetConsoleCP")
 	procGetConsoleScreenBufferInfo = kernel32.NewProc("GetConsoleScreenBufferInfo")
+	procSetConsoleScreenBufferSize = kernel32.NewProc("SetConsoleScreenBufferSize")
+	procSetConsoleWindowInfo       = kernel32.NewProc("SetConsoleWindowInfo")
+	procFillConsoleOutputCharacter = kernel32.NewProc("FillConsoleOutputCharacterW")
+	procFillConsoleOutputAttribute = kernel32.NewProc("FillConsoleOutputAttribute")
+	procSetConsoleCursorPosition   = kernel32.NewProc("SetConsoleCursorPosition")
 
 	msvcrt     = syscall.NewLazyDLL("msvcrt.dll")
 	procKbhit  = msvcrt.NewProc("_kbhit")
@@ -137,6 +142,10 @@ type consoleScreenBufferInfo struct {
 	MaximumWindowSize coord
 }
 
+func packCoord(c coord) uintptr {
+	return uintptr(uint32(uint16(c.X)) | (uint32(uint16(c.Y)) << 16))
+}
+
 func initWindowsConsole() {
 	if runtime.GOOS != "windows" {
 		return
@@ -160,8 +169,24 @@ func initWindowsConsole() {
 		ret, _, _ := procGetConsoleScreenBufferInfo.Call(uintptr(hOut), uintptr(unsafe.Pointer(&info)))
 		if ret != 0 {
 			width := int(info.Window.Right - info.Window.Left + 1)
+			targetCols := int16(UIWidth + 6)
+			targetLines := int16(42)
 			if width < UIWidth+2 {
-				_ = exec.Command("cmd", "/c", fmt.Sprintf("mode con: cols=%d lines=42", UIWidth+6)).Run()
+				newBufSize := info.Size
+				if newBufSize.X < targetCols {
+					newBufSize.X = targetCols
+				}
+				if newBufSize.Y < targetLines {
+					newBufSize.Y = 3000
+				}
+				procSetConsoleScreenBufferSize.Call(uintptr(hOut), packCoord(newBufSize))
+				rect := smallRect{
+					Left:   0,
+					Top:    0,
+					Right:  targetCols - 1,
+					Bottom: targetLines - 1,
+				}
+				procSetConsoleWindowInfo.Call(uintptr(hOut), 1, uintptr(unsafe.Pointer(&rect)))
 			}
 		}
 	}
@@ -184,12 +209,34 @@ func setWindowTitle(subtitle string) {
 
 func clearScreen() {
 	if runtime.GOOS == "windows" {
-		cmd := exec.Command("cmd", "/c", "cls")
-		cmd.Stdout = os.Stdout
-		_ = cmd.Run()
-	} else {
-		fmt.Print("\033[H\033[2J")
+		hOut, err := syscall.GetStdHandle(syscall.STD_OUTPUT_HANDLE)
+		if err == nil && hOut != syscall.InvalidHandle {
+			var info consoleScreenBufferInfo
+			ret, _, _ := procGetConsoleScreenBufferInfo.Call(uintptr(hOut), uintptr(unsafe.Pointer(&info)))
+			if ret != 0 {
+				length := uint32(int32(info.Size.X) * int32(info.Size.Y))
+				origin := packCoord(coord{X: 0, Y: 0})
+				var written uint32
+				procFillConsoleOutputCharacter.Call(
+					uintptr(hOut),
+					uintptr(' '),
+					uintptr(length),
+					origin,
+					uintptr(unsafe.Pointer(&written)),
+				)
+				procFillConsoleOutputAttribute.Call(
+					uintptr(hOut),
+					uintptr(info.Attributes),
+					uintptr(length),
+					origin,
+					uintptr(unsafe.Pointer(&written)),
+				)
+				procSetConsoleCursorPosition.Call(uintptr(hOut), origin)
+				return
+			}
+		}
 	}
+	fmt.Print("\x1b[H\x1b[2J\x1b[3J")
 }
 
 func kbhit() bool {
@@ -618,18 +665,38 @@ func renderTable(cols []tableCol, rows []tableRow, heavyHeader bool, totalInnerW
 			continue
 		}
 
-		wrappedCells := make([][]string, numCols)
+		// If the last column is empty on this row and the second-to-last column is left-aligned,
+		// merge/span the last two columns so action descriptions never get cropped.
+		rowColWidths := make([]int, numCols)
+		copy(rowColWidths, colWidths)
+		activeCols := numCols
+		if numCols >= 2 {
+			lastVal := ""
+			if numCols-1 < len(r.Cells) {
+				lastVal = r.Cells[numCols-1]
+			}
+			prevVal := ""
+			if numCols-2 < len(r.Cells) {
+				prevVal = r.Cells[numCols-2]
+			}
+			if lastVal == "" && prevVal != "" && cols[numCols-2].Justify == "left" && cols[numCols-2].NoWrap {
+				rowColWidths[numCols-2] = colWidths[numCols-2] + 3 + colWidths[numCols-1]
+				activeCols = numCols - 1
+			}
+		}
+
+		wrappedCells := make([][]string, activeCols)
 		maxLines := 1
-		for i := 0; i < numCols; i++ {
+		for i := 0; i < activeCols; i++ {
 			val := ""
 			if i < len(r.Cells) {
 				val = r.Cells[i]
 			}
 			var linesForCell []string
 			if cols[i].NoWrap {
-				linesForCell = []string{truncateWithEllipsis(val, colWidths[i])}
+				linesForCell = []string{truncateWithEllipsis(val, rowColWidths[i])}
 			} else {
-				linesForCell = wrapStyledText(val, colWidths[i])
+				linesForCell = wrapStyledText(val, rowColWidths[i])
 			}
 			if len(linesForCell) == 0 {
 				linesForCell = []string{""}
@@ -642,7 +709,7 @@ func renderTable(cols []tableCol, rows []tableRow, heavyHeader bool, totalInnerW
 
 		for lineIdx := 0; lineIdx < maxLines; lineIdx++ {
 			var rowBuilder strings.Builder
-			for colIdx := 0; colIdx < numCols; colIdx++ {
+			for colIdx := 0; colIdx < activeCols; colIdx++ {
 				if colIdx > 0 {
 					rowBuilder.WriteString(" ")
 				}
@@ -651,7 +718,7 @@ func renderTable(cols []tableCol, rows []tableRow, heavyHeader bool, totalInnerW
 					cellLine = wrappedCells[colIdx][lineIdx]
 				}
 				rowBuilder.WriteString(" ")
-				rowBuilder.WriteString(formatCellLine(cellLine, colWidths[colIdx], cols[colIdx].Justify))
+				rowBuilder.WriteString(formatCellLine(cellLine, rowColWidths[colIdx], cols[colIdx].Justify))
 				rowBuilder.WriteString(" ")
 			}
 			out = append(out, rowBuilder.String())
@@ -1225,7 +1292,7 @@ func validateAndLoadConfig() *AppConfig {
 
 		if choice == "E" {
 			if runtime.GOOS == "windows" {
-				_ = exec.Command("cmd", "/c", "start", "", ConfigPath).Start()
+				_ = exec.Command("notepad.exe", ConfigPath).Start()
 			}
 			fmt.Printf("  %sPress Enter after saving config.ini in Notepad...%s", AccentAmber, Reset)
 			_, _ = reader.ReadString('\n')
@@ -1334,7 +1401,7 @@ func openFolderInExplorer(folderPath string) {
 
 func openURLInBrowser(targetURL string) {
 	if runtime.GOOS == "windows" {
-		_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", targetURL).Start()
+		_ = exec.Command("explorer", targetURL).Start()
 	}
 }
 
@@ -1797,7 +1864,7 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 		} else if key == "E" {
 			writeCleanConfigFile(cfg)
 			if runtime.GOOS == "windows" {
-				_ = exec.Command("cmd", "/c", "start", "", ConfigPath).Start()
+				_ = exec.Command("notepad.exe", ConfigPath).Start()
 			}
 			fmt.Printf("\n  %sPress Enter after saving config.ini in Notepad...%s", AccentAmber, Reset)
 			_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
@@ -1892,6 +1959,8 @@ type ContainerInfo struct {
 
 type SessionHolder struct {
 	mu              sync.Mutex
+	Launcher        *launcher.Launcher
+	ProfileDir      string
 	Browser         *rod.Browser
 	KeepalivePage   *rod.Page
 	BrowserName     string
@@ -1941,22 +2010,126 @@ func safeClosePage(p *rod.Page) {
 	_ = p.Context(ctx).Close()
 }
 
+func isBrowserProcessName(exeName string) bool {
+	name := strings.ToLower(strings.TrimSpace(exeName))
+	return name == "chrome.exe" || name == "msedge.exe" || name == "brave.exe" || name == "chromium.exe"
+}
+
+// killProcessTreeNative terminates a root browser PID and all of its child/descendant
+// browser processes using pure Go standard library syscalls (zero taskkill.exe or
+// powershell.exe spawned) while verifying process executable names to prevent PID-reuse accidents.
+func killProcessTreeNative(rootPID int) {
+	if runtime.GOOS != "windows" || rootPID <= 0 {
+		return
+	}
+	snapshot, err := syscall.CreateToolhelp32Snapshot(syscall.TH32CS_SNAPPROCESS, 0)
+	if err != nil || snapshot == syscall.InvalidHandle {
+		return
+	}
+	defer syscall.CloseHandle(snapshot)
+
+	childrenMap := make(map[uint32][]uint32)
+	procNames := make(map[uint32]string)
+
+	var pe syscall.ProcessEntry32
+	pe.Size = uint32(unsafe.Sizeof(pe))
+	if err := syscall.Process32First(snapshot, &pe); err == nil {
+		for {
+			exeName := syscall.UTF16ToString(pe.ExeFile[:])
+			procNames[pe.ProcessID] = exeName
+			childrenMap[pe.ParentProcessID] = append(childrenMap[pe.ParentProcessID], pe.ProcessID)
+			if err := syscall.Process32Next(snapshot, &pe); err != nil {
+				break
+			}
+		}
+	}
+
+	// If rootPID is still alive in the process table, verify it is actually a browser executable
+	// so we never terminate an unrelated system or user process due to Windows PID reuse.
+	if rootName, exists := procNames[uint32(rootPID)]; exists {
+		if !isBrowserProcessName(rootName) {
+			return
+		}
+	}
+
+	var toKill []uint32
+	queue := []uint32{uint32(rootPID)}
+	visited := make(map[uint32]bool)
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+		if visited[curr] {
+			continue
+		}
+		visited[curr] = true
+		if name, ok := procNames[curr]; ok && isBrowserProcessName(name) {
+			toKill = append(toKill, curr)
+		}
+		for _, child := range childrenMap[curr] {
+			if !visited[child] {
+				queue = append(queue, child)
+			}
+		}
+	}
+
+	for i := len(toKill) - 1; i >= 0; i-- {
+		if p, err := os.FindProcess(int(toKill[i])); err == nil {
+			_ = p.Kill()
+		}
+	}
+}
+
+func cleanStaleProfileLocks(profileDir string) {
+	if profileDir == "" {
+		return
+	}
+	pidFile := filepath.Join(profileDir, ".browser.pid")
+	if rawPID, err := os.ReadFile(pidFile); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID))); err == nil && pid > 0 {
+			killProcessTreeNative(pid)
+		}
+		_ = os.Remove(pidFile)
+	}
+	for _, lockName := range []string{"lockfile", "SingletonLock", "SingletonCookie", "SingletonSocket"} {
+		_ = os.Remove(filepath.Join(profileDir, lockName))
+	}
+}
+
 func safeCloseBrowser(s *SessionHolder) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	b := s.Browser
+	l := s.Launcher
+	profDir := s.ProfileDir
 	s.Browser = nil
+	s.Launcher = nil
 	s.KeepalivePage = nil
 	s.mu.Unlock()
 
 	if b != nil {
-		defer func() { _ = recover() }()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = b.Context(ctx).Close()
+		func() {
+			defer func() { _ = recover() }()
+			ctx, cancel := context.WithTimeout(context.Background(), 1000*time.Millisecond)
+			defer cancel()
+			_ = proto.BrowserClose{}.Call(b.Context(ctx))
+			_ = b.Context(ctx).Close()
+		}()
 	}
+
+	if l != nil {
+		if pid := l.PID(); pid > 0 {
+			killProcessTreeNative(pid)
+		}
+		func() {
+			defer func() { _ = recover() }()
+			l.Kill()
+		}()
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	cleanStaleProfileLocks(profDir)
 }
 
 func isBrowserAlive(s *SessionHolder) bool {
@@ -2080,19 +2253,40 @@ func ensureBrowserSession(session *SessionHolder, cfg *AppConfig) (*rod.Browser,
 
 		logMsg(fmt.Sprintf("Launching Browser (%s)...", exePath), "INFO", cfg)
 
-		l := launcher.New().
-			Leakless(false).
-			Bin(exePath).
-			UserDataDir(profileDir).
-			Headless(false).
-			Delete("no-sandbox").
-			Delete("enable-automation").
-			Set("disable-blink-features", "AutomationControlled").
-			Set("start-maximized")
+		newLauncher := func() *launcher.Launcher {
+			return launcher.New().
+				Leakless(false).
+				Bin(exePath).
+				UserDataDir(profileDir).
+				Headless(false).
+				Delete("no-sandbox").
+				Delete("enable-automation").
+				Set("disable-blink-features", "AutomationControlled").
+				Set("disable-background-mode").
+				Set("disable-backgrounding-occluded-windows").
+				Set("no-first-run").
+				Set("no-default-browser-check").
+				Set("start-maximized")
+		}
 
+		cleanStaleProfileLocks(profileDir)
+
+		l := newLauncher()
 		controlURL, err := l.Launch()
 		if err != nil {
-			return nil, nil, err
+			logMsg("Waiting for previous browser session to finish closing and retrying...", "INFO", cfg)
+			cleanStaleProfileLocks(profileDir)
+			time.Sleep(600 * time.Millisecond)
+			l = newLauncher()
+			controlURL, err = l.Launch()
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+
+		if pid := l.PID(); pid > 0 {
+			_ = os.MkdirAll(profileDir, 0755)
+			_ = os.WriteFile(filepath.Join(profileDir, ".browser.pid"), []byte(strconv.Itoa(pid)), 0644)
 		}
 
 		b := rod.New().ControlURL(controlURL).NoDefaultDevice()
@@ -2123,9 +2317,11 @@ func ensureBrowserSession(session *SessionHolder, cfg *AppConfig) (*rod.Browser,
 
 		waitTargetCreated := b.EachEvent(func(e *proto.TargetTargetCreated) {
 			if e.TargetInfo.Type == proto.TargetTargetInfoTypePage {
-				if pg, err := b.PageFromTarget(e.TargetInfo.TargetID); err == nil {
-					attachInitScriptToPage(pg)
-				}
+				go func(targetID proto.TargetTargetID) {
+					if pg, err := b.PageFromTarget(targetID); err == nil {
+						attachInitScriptToPage(pg)
+					}
+				}(e.TargetInfo.TargetID)
 			}
 		})
 		go waitTargetCreated()
@@ -2192,6 +2388,8 @@ func ensureBrowserSession(session *SessionHolder, cfg *AppConfig) (*rod.Browser,
 		go router.Run()
 
 		session.mu.Lock()
+		session.Launcher = l
+		session.ProfileDir = profileDir
 		session.Browser = b
 		session.KeepalivePage = keepalive
 		session.BrowserName = desiredBrowser
@@ -2400,7 +2598,10 @@ func harvestIntermediateLinkURL(
 	session.SetPhase("HARVEST_LINKS")
 	captureCh := make(chan string, 4)
 	session.SetCaptureChan(captureCh)
-	defer session.SetCaptureChan(nil)
+	defer func() {
+		session.SetCaptureChan(nil)
+		session.SetPhase("IDLE")
+	}()
 
 	defer func() {
 		if !isPageClosed(b, mainPage) {
@@ -2546,7 +2747,7 @@ func resolveLinkInvisibly(
 			req.Header.Set("User-Agent", session.UserAgent)
 		}
 		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-		if cookieHeader != "" {
+		if cookieHeader != "" && strings.Contains(strings.ToLower(req.URL.Host), "filecrypt.") {
 			req.Header.Set("Cookie", cookieHeader)
 		}
 
@@ -2554,7 +2755,7 @@ func resolveLinkInvisibly(
 		if err != nil {
 			return "", err
 		}
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
 		_ = resp.Body.Close()
 
 		if resp.StatusCode == 301 || resp.StatusCode == 302 || resp.StatusCode == 303 || resp.StatusCode == 307 || resp.StatusCode == 308 {
@@ -2706,6 +2907,7 @@ func resolveLinkSmart(
 			printResolvedItem(indexNum, totalNum, filename, "[ERROR - Could not open background resolver tab]", false)
 			return "", nil
 		}
+		wp = wp.Context(context.Background())
 		attachInitScriptToPage(wp)
 		_ = proto.NetworkEnable{}.Call(wp.Context(ctx))
 		workerHolder.Page = wp
@@ -2819,12 +3021,16 @@ func resolveLinkSmart(
 		return finalURL, nil
 
 	case <-ctx.Done():
+		if r := getAbortReason(); r != nil {
+			if workerHolder.Page != nil {
+				safeClosePage(workerHolder.Page)
+				workerHolder.Page = nil
+			}
+			return "", r
+		}
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		_ = proto.PageStopLoading{}.Call(workerPage.Context(stopCtx))
 		stopCancel()
-		if r := getAbortReason(); r != nil {
-			return "", r
-		}
 		printResolvedItem(indexNum, totalNum, filename, "[TIMEOUT - Failed to resolve within 20s]", false)
 		return "", nil
 	}
@@ -3563,6 +3769,11 @@ func processSingleContainer(containerURL string, cfg *AppConfig, session *Sessio
 			}
 		}
 
+		if workerHolder.Page != nil {
+			safeClosePage(workerHolder.Page)
+			workerHolder.Page = nil
+		}
+
 		if browserClosedDuringBatch {
 			break
 		}
@@ -3675,6 +3886,5 @@ func main() {
 		} else if action == "BROWSER_CLOSED" {
 			homeWarning = fmt.Sprintf("%s! Browser tab or window was closed. Returned to Home.%s", AccentAmber, Reset)
 		}
-
 	}
 }
