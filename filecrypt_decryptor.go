@@ -63,6 +63,7 @@ const (
 	AppLicenseURL    = "https://github.com/ArvindSaini978/Filecrypt-Decryptor/blob/master/LICENSE"
 	AppYear          = "2026"
 	AppDataFolder    = "FilecryptDecryptor"
+	MaxSettingsSlots = 19
 )
 
 // ==============================================================================
@@ -206,7 +207,7 @@ func initWindowsConsole() {
 		if ret != 0 {
 			width := int(info.Window.Right - info.Window.Left + 1)
 			targetCols := int16(UIWidth + 6)
-			targetLines := int16(42)
+			targetLines := int16(44)
 			if width < UIWidth+2 {
 				newBufSize := info.Size
 				if newBufSize.X < targetCols {
@@ -268,7 +269,10 @@ func drainKeyboardBuffer() {
 		return
 	}
 	for kbhit() {
-		getwch()
+		ch := getwch()
+		if (ch == 0x00 || ch == 0xe0) && kbhit() {
+			getwch()
+		}
 	}
 }
 
@@ -1382,8 +1386,12 @@ func validateAndLoadConfig() *AppConfig {
 				}
 			}
 
-			for _, id := range []string{"1", "2", "3", "4", "5", "6", "7", "8"} {
-				meta := SettingsMetadata[id]
+			for slot := 1; slot <= MaxSettingsSlots; slot++ {
+				id := strconv.Itoa(slot)
+				meta, exists := SettingsMetadata[id]
+				if !exists {
+					continue
+				}
 				sec, k := meta.Section, meta.Key
 				if cfg.HasOption(sec, k) {
 					val := strings.ToLower(strings.TrimSpace(cfg.Get(sec, k, "")))
@@ -1464,8 +1472,16 @@ func validateAndLoadConfig() *AppConfig {
 					}
 				}
 			}
-			for _, meta := range SettingsMetadata {
+			for slot := 1; slot <= MaxSettingsSlots; slot++ {
+				meta, exists := SettingsMetadata[strconv.Itoa(slot)]
+				if !exists {
+					continue
+				}
 				sec, k := meta.Section, meta.Key
+				defaultVal, hasDefault := DefaultConfigMap[sec][k]
+				if !hasDefault && len(meta.Options) > 0 {
+					defaultVal = meta.Options[0].Value
+				}
 				val := strings.ToLower(fixedCfg.Get(sec, k, ""))
 				valid := false
 				for _, opt := range meta.Options {
@@ -1474,8 +1490,8 @@ func validateAndLoadConfig() *AppConfig {
 						break
 					}
 				}
-				if !valid {
-					fixedCfg.Set(sec, k, DefaultConfigMap[sec][k])
+				if !valid && hasDefault {
+					fixedCfg.Set(sec, k, defaultVal)
 				}
 			}
 			dVal, err := strconv.ParseFloat(fixedCfg.Get("Behavior", "request_delay", "0.2"), 64)
@@ -1583,6 +1599,8 @@ func readTextWithEsc(prompt string) (string, bool) {
 			}
 
 			if ch == 0x1b {
+				time.Sleep(80 * time.Millisecond)
+				drainKeyboardBuffer()
 				fmt.Printf(" %s(Cancelled)%s\n", AccentAmber, Reset)
 				return "", false
 			}
@@ -1644,6 +1662,8 @@ func readTextWithEscAndAbort(prompt string, abortCheckFn func() bool) (string, b
 			}
 
 			if ch == 0x1b {
+				time.Sleep(80 * time.Millisecond)
+				drainKeyboardBuffer()
 				fmt.Printf(" %s(Cancelled)%s\n", AccentAmber, Reset)
 				return "", false
 			}
@@ -1756,10 +1776,18 @@ func waitForSingleKey(prompt string, validLetters []string, maxNum int, abortChe
 	}
 
 	buffer := ""
+	var digitDeadline time.Time
+
 	for {
 		if abortCheckFn != nil && abortCheckFn() {
 			fmt.Print("\n")
 			return ""
+		}
+
+		// If waiting for a potential second digit and the 700ms window expires, submit buffer
+		if buffer != "" && !digitDeadline.IsZero() && time.Now().After(digitDeadline) {
+			fmt.Print("\n")
+			return buffer
 		}
 
 		if kbhit() {
@@ -1771,6 +1799,8 @@ func waitForSingleKey(prompt string, validLetters []string, maxNum int, abortChe
 			}
 
 			if ch == 0x1b && allowEsc {
+				time.Sleep(80 * time.Millisecond)
+				drainKeyboardBuffer()
 				fmt.Printf("%sEsc%s\n", AccentAmber, Reset)
 				return "ESC"
 			}
@@ -1786,6 +1816,11 @@ func waitForSingleKey(prompt string, validLetters []string, maxNum int, abortChe
 				if len(buffer) > 0 {
 					buffer = buffer[:len(buffer)-1]
 					fmt.Print("\b \b")
+					if buffer == "" {
+						digitDeadline = time.Time{}
+					} else {
+						digitDeadline = time.Now().Add(700 * time.Millisecond)
+					}
 				}
 				continue
 			}
@@ -1800,11 +1835,16 @@ func waitForSingleKey(prompt string, validLetters []string, maxNum int, abortChe
 
 			chUp := strings.ToUpper(string(ch))
 			if buffer == "" && validSet[chUp] {
+				time.Sleep(80 * time.Millisecond)
+				drainKeyboardBuffer()
 				fmt.Printf("%s%s%s\n", Bold+AccentTeal, chUp, Reset)
 				return chUp
 			}
 
 			if maxNum > 0 && unicode.IsDigit(ch) {
+				if buffer == "" && ch == '0' {
+					continue
+				}
 				buffer += string(ch)
 				fmt.Print(string(ch))
 
@@ -1814,22 +1854,11 @@ func waitForSingleKey(prompt string, validLetters []string, maxNum int, abortChe
 					return buffer
 				}
 
-				moreTyped := false
-				for i := 0; i < 9; i++ {
-					time.Sleep(50 * time.Millisecond)
-					if kbhit() {
-						moreTyped = true
-						break
-					}
-				}
-				if !moreTyped {
-					fmt.Print("\n")
-					return buffer
-				}
+				digitDeadline = time.Now().Add(700 * time.Millisecond)
 			}
 		}
 
-		time.Sleep(40 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 
@@ -1867,7 +1896,7 @@ func showAboutLicenseScreen() {
 
 		key := waitForSingleKey(
 			fmt.Sprintf("\n  %sPress [G] GitHub Repo, [L] License, or [Esc] to return: %s", AccentTeal, Reset),
-			[]string{"G", "L", "B", "Q", "I"},
+			[]string{"G", "L", "B", "I"},
 			0, nil, true,
 		)
 		if key == "G" {
@@ -1883,7 +1912,11 @@ func showAboutLicenseScreen() {
 
 func chooseSettingOptionSubmenu(cfg *AppConfig, settingID string, parentPath string) string {
 	meta := SettingsMetadata[settingID]
-	currentVal := strings.ToLower(strings.TrimSpace(cfg.Get(meta.Section, meta.Key, "")))
+	defaultFallback := ""
+	if len(meta.Options) > 0 {
+		defaultFallback = meta.Options[0].Value
+	}
+	currentVal := strings.ToLower(strings.TrimSpace(cfg.Get(meta.Section, meta.Key, defaultFallback)))
 
 	printAppHeader(fmt.Sprintf("%s / %s", parentPath, meta.Title), true, "")
 
@@ -1930,14 +1963,16 @@ func chooseSettingOptionSubmenu(cfg *AppConfig, settingID string, parentPath str
 
 	choice := waitForSingleKey(
 		fmt.Sprintf("\n  %sSelect option [1-%d, Esc]: %s", AccentTeal, len(meta.Options), Reset),
-		[]string{"B", "Q"},
+		[]string{"B"},
 		len(meta.Options), nil, true,
 	)
 
 	if idx, err := strconv.Atoi(choice); err == nil && idx >= 1 && idx <= len(meta.Options) {
 		selected := meta.Options[idx-1]
 		cfg.Set(meta.Section, meta.Key, selected.Value)
-		writeCleanConfigFile(cfg)
+		if _, isPersistedSection := DefaultConfigMap[meta.Section][meta.Key]; isPersistedSection {
+			writeCleanConfigFile(cfg)
+		}
 		return fmt.Sprintf("%s✓ Updated '%s' to%s %s%s%s",
 			AccentGreen, meta.Title, Reset, Bold+TextMain, selected.Label, Reset)
 	}
@@ -1952,7 +1987,11 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 		printAppHeader(settingsPath, true, "")
 
 		if statusBanner != "" {
-			printPanel([]string{"  " + statusBanner}, "", AccentGreen, 0, 1)
+			bannerBorder := AccentGreen
+			if strings.Contains(statusBanner, AccentAmber) || strings.Contains(statusBanner, AccentCoral) {
+				bannerBorder = AccentAmber
+			}
+			printPanel([]string{"  " + statusBanner}, "", bannerBorder, 0, 1)
 		}
 
 		cols := []tableCol{
@@ -2087,6 +2126,40 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 			TextMuted + "Output folder for .txt files" + Reset,
 		}})
 
+		totalSettings := 9
+
+		// Render any registered settings in slots [10]..[19]
+		for slot := 10; slot <= MaxSettingsSlots; slot++ {
+			id := strconv.Itoa(slot)
+			meta, exists := SettingsMetadata[id]
+			if !exists {
+				continue
+			}
+			totalSettings = slot
+			defVal := ""
+			if len(meta.Options) > 0 {
+				defVal = meta.Options[0].Value
+			}
+			curRaw := strings.ToLower(strings.TrimSpace(cfg.Get(meta.Section, meta.Key, defVal)))
+			curLabel := strings.ToUpper(curRaw)
+			for _, opt := range meta.Options {
+				if opt.Value == curRaw {
+					curLabel = opt.Label
+					break
+				}
+			}
+			valColor := Bold + AccentGreen
+			if curRaw == "false" || curRaw == "no" || curRaw == "off" {
+				valColor = Bold + AccentAmber
+			}
+			rows = append(rows, tableRow{Cells: []string{
+				fmt.Sprintf("%s[%d]%s", Bold+AccentTeal, slot, Reset),
+				TextMain + meta.Title + Reset,
+				valColor + curLabel + Reset,
+				TextMuted + meta.Info + Reset,
+			}})
+		}
+
 		rows = append(rows, tableRow{IsSection: true})
 		rows = append(rows, tableRow{Cells: []string{
 			Bold + AccentAmber + "[R]" + Reset,
@@ -2111,12 +2184,12 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 		printPanel(tblLines, "", BorderSubtle, 0, 1)
 
 		key := waitForSingleKey(
-			fmt.Sprintf("\n  %sSelect a setting [1-9, R, E, Esc]: %s", AccentTeal, Reset),
-			[]string{"R", "E", "B", "Q"},
-			9, nil, true,
+			fmt.Sprintf("\n  %sSelect a setting [1-%d, R, E, Esc]: %s", AccentTeal, totalSettings, Reset),
+			[]string{"R", "E", "B"},
+			totalSettings, nil, true,
 		)
 
-		if key == "ESC" || key == "B" || key == "Q" || key == "" {
+		if key == "ESC" || key == "B" || key == "" {
 			break
 		} else if _, ok := SettingsMetadata[key]; ok {
 			msg := chooseSettingOptionSubmenu(cfg, key, settingsPath)
@@ -2143,7 +2216,7 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 			printAppHeader(fmt.Sprintf("%s / Reset Defaults", settingsPath), true, "")
 			confirm := waitForSingleKey(
 				fmt.Sprintf("\n  %sReset ALL settings to recommended defaults? [Y / N / Esc]: %s", AccentAmber, Reset),
-				[]string{"Y", "N"},
+				[]string{"Y", "N", "B"},
 				0, nil, true,
 			)
 			if confirm == "Y" {
@@ -2169,6 +2242,9 @@ func interactiveSettingsMenu(cfg *AppConfig, parentPath string) {
 				}
 			}
 			statusBanner = AccentGreen + "✓ Reloaded & validated config.ini from Notepad!" + Reset
+		} else {
+			statusBanner = fmt.Sprintf("%s! Invalid setting [%s]. Please select a setting between [1] and [%d].%s",
+				AccentAmber, key, totalSettings, Reset)
 		}
 	}
 }
