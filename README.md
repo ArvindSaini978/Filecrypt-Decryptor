@@ -53,7 +53,7 @@
 ## 🚀 Quick Start
 
 ### Option 1: Standalone Windows Executable (Recommended)
-1. Go to the [**Releases Page**](https://github.com/ArvindSaini978/Filecrypt-Decryptor/releases/latest) and download **`FilecryptDecryptor-v2.0.0-x64.exe`** (or `-arm64.exe` / `-x86.exe` for your system).
+1. Go to the [**Releases Page**](https://github.com/ArvindSaini978/Filecrypt-Decryptor/releases/latest) and download **`FilecryptDecryptor-x64.exe`** (or `-arm64.exe` / `-x86.exe` for your system).
 2. Double-click the `.exe` to launch the app.
 3. Paste any Filecrypt Container URL and press **Enter**!
 > **Note:** Works out-of-the-box with **Google Chrome**, **Microsoft Edge**, **Brave Browser**, or **Chromium** installed on your PC. Press **`[S]` (Settings)** inside the app to switch browsers anytime.
@@ -105,7 +105,7 @@ go install github.com/tc-hib/go-winres@latest
 $env:CGO_ENABLED = "0"
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-go build -trimpath -ldflags="-w" -o dist\FilecryptDecryptor-v2.0.0-x64.exe
+go build -trimpath -ldflags="-w" -o dist\FilecryptDecryptor-x64.exe
 Remove-Item -Force rsrc_windows_*.syso -ErrorAction SilentlyContinue
 ```
 
